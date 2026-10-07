@@ -27,6 +27,7 @@ import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.LoadParams
@@ -63,6 +64,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.cos.COSBase
 import com.tom_roush.pdfbox.cos.COSName
@@ -107,6 +109,8 @@ import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -235,6 +239,7 @@ class ConversionService : Service() {
                         input.category == ConversionMediaCategory.Document -> "Office2Pdf"
                         input.category == ConversionMediaCategory.Font -> "Font"
                         input.category == ConversionMediaCategory.Subtitle -> "Subtitle"
+                        input.category == ConversionMediaCategory.Video && isVideoContactSheetOutput(input) -> "ContactSheet"
                         useCompatibilityEngine -> "Compatibility"
                         else -> "Unrouted"
                     }
@@ -340,22 +345,19 @@ class ConversionService : Service() {
                 }
             }
 
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            var durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
                 ?: input.inputInfo?.durationMs
                 ?: 0L
-            val rawWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+            var rawWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
                 ?: input.inputInfo?.width
                 ?: 1920
-            val rawHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            var rawHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
                 ?: input.inputInfo?.height
                 ?: 1080
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-            val isRotated = rotation == 90 || rotation == 270
-            val displayWidth = if (isRotated) rawHeight else rawWidth
-            val displayHeight = if (isRotated) rawWidth else rawHeight
-            val captureFps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()
+            var rawRotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toDoubleOrNull()?.toInt() ?: 0
+            var captureFps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()
                 ?: input.inputInfo?.frameRate
-            val totalBitrateBps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()
+            var totalBitrateBps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()
                 ?: input.inputInfo?.bitrateBitsPerSecond
 
             var videoCodecName = localizedText(R.string.contact_sheet_unknown_codec).resolve(this)
@@ -376,9 +378,54 @@ class ConversionService : Service() {
                             FFprobeKit.getMediaInformation(inputSource.path, 2000)?.getMediaInformation()
                         }.getOrNull()
                         if (mediaInfo != null) {
+                            if (durationMs <= 0L) {
+                                mediaInfo.getDuration()?.toDoubleOrNull()?.let { durationSec ->
+                                    val parsedMs = (durationSec * 1000).toLong()
+                                    if (parsedMs > 0L) durationMs = parsedMs
+                                }
+                            }
+                            if (totalBitrateBps == null) {
+                                mediaInfo.getBitrate()?.toLongOrNull()?.let {
+                                    if (it > 0L) totalBitrateBps = it
+                                }
+                            }
                             val streams = mediaInfo.getStreams().orEmpty()
                             val vStream = streams.firstOrNull { it.getType().equals("video", ignoreCase = true) }
                             if (vStream != null) {
+                                val probeWidth = vStream.getWidth()?.toInt()
+                                val probeHeight = vStream.getHeight()?.toInt()
+                                if (probeWidth != null && probeWidth > 0 && probeHeight != null && probeHeight > 0) {
+                                    rawWidth = probeWidth
+                                    rawHeight = probeHeight
+                                }
+                                val probeRotation = vStream.getNumberProperty("rotate")?.toInt()
+                                    ?: vStream.getStringProperty("rotate")?.toDoubleOrNull()?.toInt()
+                                    ?: vStream.getTags()?.opt("rotate")?.toString()?.toDoubleOrNull()?.toInt()
+                                    ?: runCatching {
+                                        val sideData = vStream.getAllProperties()?.optJSONArray("side_data_list")
+                                        if (sideData != null) {
+                                            var rot: Int? = null
+                                            for (j in 0 until sideData.length()) {
+                                                val obj = sideData.optJSONObject(j)
+                                                val r = obj?.opt("rotation")?.toString()?.toDoubleOrNull()?.toInt()
+                                                if (r != null && r != 0) {
+                                                    rot = r
+                                                    break
+                                                }
+                                            }
+                                            rot
+                                        } else null
+                                    }.getOrNull()
+                                if (rawRotation == 0 && probeRotation != null && probeRotation != 0) {
+                                    rawRotation = probeRotation
+                                }
+                                if (captureFps == null) {
+                                    val rFps = vStream.getRealFrameRate()?.let { parseFpsString(it) }
+                                        ?: vStream.getAverageFrameRate()?.let { parseFpsString(it) }
+                                    if (rFps != null && rFps > 0f) {
+                                        captureFps = rFps
+                                    }
+                                }
                                 videoCodecName = vStream.getCodec().orEmpty().ifBlank { videoCodecName }
                                 videoProfile = vStream.getStringProperty("profile").orEmpty()
                                 videoPixFmt = vStream.getFormat().orEmpty()
@@ -407,6 +454,11 @@ class ConversionService : Service() {
                 }
             }
 
+            val rotation = ((rawRotation % 360) + 360) % 360
+            val isRotated = rotation == 90 || rotation == 270
+            val displayWidth = if (isRotated) rawHeight else rawWidth
+            val displayHeight = if (isRotated) rawWidth else rawHeight
+
             if (audioCodecName.isBlank()) {
                 val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
                 if (hasAudio != null) {
@@ -424,77 +476,113 @@ class ConversionService : Service() {
             }
             val effectiveDurationMs = (effectiveEndMs - effectiveStartMs).coerceAtLeast(1000L)
 
-            val grid = input.contactSheetOptions.grid
-            val rows = grid.rows
-            val cols = grid.cols
-            val frameCount = rows * cols
-
-            val sheetWidth = 2048
-            val margin = 20
-            val gap = 12
-            val availableWidth = sheetWidth - (margin * 2) - ((cols - 1) * gap)
-            val cellWidth = availableWidth / cols
-            val cellHeight = (cellWidth * (displayHeight.toFloat() / displayWidth)).toInt().coerceAtLeast(80)
-
+            val geometry = ContactSheetGeometry.calculate(
+                input.contactSheetOptions,
+                displayWidth,
+                displayHeight
+            )
+            if (!geometry.isValid) {
+                throw LocalizedFailure(localizedText(R.string.message_video_contact_sheet_failed))
+            }
+            val frameCount = geometry.frameCount
+            val sheetWidth = geometry.width
+            val sheetHeight = geometry.height
+            val margin = input.contactSheetOptions.outerMarginPx.coerceIn(
+                ContactSheetGeometry.MIN_MARGIN,
+                ContactSheetGeometry.MAX_MARGIN
+            )
+            val cellWidth = geometry.cellWidth
+            val cellHeight = geometry.cellHeight
             val includeHeader = input.contactSheetOptions.includeHeader
-            val headerHeight = if (includeHeader) 160 else 0
-            val sheetHeight = headerHeight + (margin * 2) + (rows * cellHeight) + ((rows - 1) * gap)
+            val headerHeight = geometry.headerHeight
 
             val stepMs = effectiveDurationMs / (frameCount + 1)
-            val frameBitmaps = mutableListOf<Pair<Bitmap, Long>>()
+            val frameSlots = arrayOfNulls<Pair<Bitmap, Long>>(frameCount)
+            var retrieverAvailable = true
+            var retrieverFailures = 0
 
-            for (i in 0 until frameCount) {
+            try {
+                for (i in 0 until frameCount) {
+                    if (ConversionTaskStore.isCancelled()) {
+                        return
+                    }
+                    val timeMs = effectiveStartMs + (i + 1) * stepMs
+                    val timeUs = timeMs * 1000L
+
+                    var bmp: Bitmap? = null
+
+                    if (retrieverAvailable) {
+                        bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                            runCatching {
+                                retriever.getScaledFrameAtTime(
+                                    timeUs,
+                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                    cellWidth,
+                                    cellHeight
+                                )
+                            }.getOrNull()
+                        } else null
+
+                        if (bmp == null) {
+                            bmp = runCatching {
+                                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            }.getOrNull()
+                            if (bmp != null) {
+                                val scaled = Bitmap.createScaledBitmap(bmp, cellWidth, cellHeight, true)
+                                if (scaled != bmp) bmp.recycle()
+                                bmp = scaled
+                            }
+                        }
+
+                        if (bmp == null) {
+                            retrieverFailures++
+                            if (i == 0 || retrieverFailures >= 2) {
+                                retrieverAvailable = false
+                                Log.i(TAG, "MediaMetadataRetriever failed ($retrieverFailures failure(s)); switching to FFmpeg fallback")
+                            }
+                        } else {
+                            retrieverFailures = 0
+                        }
+                    }
+
+                    if (bmp == null) {
+                        bmp = extractFrameWithFfmpeg(input, timeMs, cellWidth, cellHeight)
+                    }
+
+                    if (bmp != null) {
+                        frameSlots[i] = bmp to timeMs
+                    }
+
+                    ConversionTaskStore.updateProgress(taskIndex, 0.05f + 0.80f * ((i + 1).toFloat() / frameCount))
+                }
+
                 if (ConversionTaskStore.isCancelled()) {
-                    frameBitmaps.forEach { it.first.recycle() }
                     return
                 }
-                val timeMs = effectiveStartMs + (i + 1) * stepMs
-                val timeUs = timeMs * 1000L
 
-                var bmp: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    runCatching {
-                        retriever.getScaledFrameAtTime(
-                            timeUs,
-                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                            cellWidth,
-                            cellHeight
-                        )
-                    }.getOrNull()
-                } else null
-
-                if (bmp == null) {
-                    bmp = runCatching {
-                        retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    }.getOrNull()
-                    if (bmp != null) {
-                        val scaled = Bitmap.createScaledBitmap(bmp, cellWidth, cellHeight, true)
-                        if (scaled != bmp) bmp.recycle()
-                        bmp = scaled
-                    }
+                if (frameSlots.all { it == null }) {
+                    throw LocalizedFailure(localizedText(R.string.message_video_contact_sheet_failed))
                 }
-
-                if (bmp != null && rotation != 0) {
-                    val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                    val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                    if (rotated != bmp) bmp.recycle()
-                    bmp = rotated
-                }
-
-                if (bmp != null) {
-                    frameBitmaps.add(bmp to timeMs)
-                }
-
-                ConversionTaskStore.updateProgress(taskIndex, 0.05f + 0.80f * ((i + 1).toFloat() / frameCount))
-            }
 
             val sheetBitmap = Bitmap.createBitmap(sheetWidth, sheetHeight, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(sheetBitmap)
-            canvas.drawColor(Color.parseColor("#16181D"))
+            try {
+                val canvas = Canvas(sheetBitmap)
+                val outputIsPng = outputProfile.extension.equals("png", ignoreCase = true)
+                val backgroundColor = when (input.contactSheetOptions.background) {
+                    ContactSheetBackground.Dark -> Color.parseColor("#16181D")
+                    ContactSheetBackground.Light -> Color.parseColor("#F4F5F7")
+                    ContactSheetBackground.Transparent -> if (outputIsPng) Color.TRANSPARENT else Color.WHITE
+                }
+                canvas.drawColor(backgroundColor)
 
             if (includeHeader) {
                 val headerRect = RectF(0f, 0f, sheetWidth.toFloat(), headerHeight.toFloat())
                 val headerBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#1C1F26")
+                    color = when (input.contactSheetOptions.background) {
+                        ContactSheetBackground.Dark -> Color.parseColor("#1C1F26")
+                        ContactSheetBackground.Light -> Color.parseColor("#E4E7EC")
+                        ContactSheetBackground.Transparent -> if (outputIsPng) Color.TRANSPARENT else Color.WHITE
+                    }
                 }
                 canvas.drawRect(headerRect, headerBgPaint)
 
@@ -507,14 +595,18 @@ class ConversionService : Service() {
                 val headerPaddingX = margin.toFloat()
                 val headerPaddingY = 24f
                 val labelTextSize = 22f
+                val lightHeader = input.contactSheetOptions.background == ContactSheetBackground.Light
+                val headerLabelColor = if (lightHeader) Color.parseColor("#475569") else Color.parseColor("#94A3B8")
+                val headerValueColor = if (lightHeader) Color.parseColor("#111827") else Color.parseColor("#F8FAFC")
+                val headerSeparatorColor = if (lightHeader) Color.parseColor("#64748B") else Color.parseColor("#475569")
 
                 val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#94A3B8")
+                    color = headerLabelColor
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
                     textSize = labelTextSize
                 }
                 val valuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#F8FAFC")
+                    color = headerValueColor
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
                     textSize = labelTextSize
                 }
@@ -524,7 +616,7 @@ class ConversionService : Service() {
                     textSize = labelTextSize
                 }
                 val separatorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#475569")
+                    color = headerSeparatorColor
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
                     textSize = labelTextSize
                 }
@@ -562,7 +654,7 @@ class ConversionService : Service() {
                 val vBitrateStr = videoBitrateKbps?.let { String.format(displayLocale, "%d kbps", it) }
                     ?: totalBitrateBps?.let { String.format(displayLocale, "%.2f Mbps", it / 1_000_000.0) }
                     ?: localizedText(R.string.text_option_value_auto).resolve(this)
-                val resStr = String.format(displayLocale, "%dx%d", displayWidth, displayHeight)
+                val resStr = String.format(displayLocale, "%dx%d", rawWidth, rawHeight)
                 val line3Segments = mutableListOf(
                     localizedText(R.string.contact_sheet_video).resolve(this@ConversionService) to labelPaint,
                     codecLabel to valuePaint,
@@ -607,9 +699,10 @@ class ConversionService : Service() {
                     drawSegments(line4Segments, headerPaddingX, curY)
                 }
 
+                if (input.contactSheetOptions.includeWatermark) {
                 val wmText = localizedText(R.string.contact_sheet_generated_by, getString(R.string.project_identifier)).resolve(this)
                 val wmPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#94A3B8")
+                    color = headerLabelColor
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
                     textSize = 20f
                 }
@@ -666,6 +759,7 @@ class ConversionService : Service() {
                 }
                 val textY = pillCenterY + (wmTextHeight / 2f) - wmMetrics.descent
                 canvas.drawText(wmText, curPillX, textY, wmPaint)
+                }
             }
 
             val includeTimestamp = input.contactSheetOptions.includeTimestamp
@@ -680,20 +774,23 @@ class ConversionService : Service() {
                 color = Color.argb(180, 0, 0, 0)
             }
 
-            for (idx in frameBitmaps.indices) {
-                val (frameBmp, timeMs) = frameBitmaps[idx]
-                val row = idx / cols
-                val col = idx % cols
-                val cellLeft = (margin + col * (cellWidth + gap)).toFloat()
-                val cellTop = (headerHeight + margin + row * (cellHeight + gap)).toFloat()
-                val cellRect = RectF(cellLeft, cellTop, cellLeft + cellWidth, cellTop + cellHeight)
+            for (i in 0 until frameCount) {
+                val slot = frameSlots[i] ?: continue
+                val (frameBmp, timeMs) = slot
+                val geometryCell = geometry.cells.getOrNull(i) ?: continue
+                val cellRect = RectF(
+                    geometryCell.left.toFloat(),
+                    geometryCell.top.toFloat(),
+                    geometryCell.right.toFloat(),
+                    geometryCell.bottom.toFloat()
+                )
 
                 val cellPath = Path().apply {
                     addRoundRect(cellRect, 8f, 8f, Path.Direction.CW)
                 }
                 canvas.save()
                 canvas.clipPath(cellPath)
-                canvas.drawBitmap(frameBmp, null, cellRect, null)
+                drawContactSheetBitmap(canvas, frameBmp, cellRect, input.contactSheetOptions.fitMode)
                 canvas.restore()
 
                 if (includeTimestamp) {
@@ -723,11 +820,181 @@ class ConversionService : Service() {
                     sheetBitmap.compress(Bitmap.CompressFormat.JPEG, 92, outStream)
                 }
             }
-            sheetBitmap.recycle()
+            } finally {
+                sheetBitmap.recycle()
+            }
+            } finally {
+                frameSlots.forEach {
+                    if (it != null && !it.first.isRecycled) {
+                        it.first.recycle()
+                    }
+                }
+            }
         } finally {
             runCatching { retriever.release() }
             runCatching { pfd?.close() }
         }
+    }
+
+    private fun drawContactSheetBitmap(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        destination: RectF,
+        fitMode: ContactSheetFitMode
+    ) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        if (fitMode == ContactSheetFitMode.Stretch) {
+            canvas.drawBitmap(bitmap, null, destination, paint)
+            return
+        }
+        val sourceAspect = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+        val destinationAspect = destination.width() / destination.height().coerceAtLeast(1f)
+        if (fitMode == ContactSheetFitMode.Contain) {
+            val scaledWidth: Float
+            val scaledHeight: Float
+            if (sourceAspect > destinationAspect) {
+                scaledWidth = destination.width()
+                scaledHeight = scaledWidth / sourceAspect
+            } else {
+                scaledHeight = destination.height()
+                scaledWidth = scaledHeight * sourceAspect
+            }
+            val left = destination.centerX() - scaledWidth / 2f
+            val top = destination.centerY() - scaledHeight / 2f
+            canvas.drawBitmap(
+                bitmap,
+                null,
+                RectF(left, top, left + scaledWidth, top + scaledHeight),
+                paint
+            )
+            return
+        }
+
+        val sourceRect = if (sourceAspect > destinationAspect) {
+            val width = (bitmap.height * destinationAspect).toInt().coerceAtLeast(1)
+            Rect(
+                (bitmap.width - width) / 2,
+                0,
+                (bitmap.width + width) / 2,
+                bitmap.height
+            )
+        } else {
+            val height = (bitmap.width / destinationAspect).toInt().coerceAtLeast(1)
+            Rect(
+                0,
+                (bitmap.height - height) / 2,
+                bitmap.width,
+                (bitmap.height + height) / 2
+            )
+        }
+        canvas.drawBitmap(bitmap, sourceRect, destination, paint)
+    }
+
+    private fun extractFrameWithFfmpeg(
+        input: ConversionTaskInput,
+        timeMs: Long,
+        targetWidth: Int,
+        targetHeight: Int
+    ): Bitmap? {
+        if (ConversionTaskStore.isCancelled()) return null
+
+        val ffmpegFailure = ensureFfmpegKitReady()
+        if (ffmpegFailure != null) return null
+
+        val inputSource = runCatching { openFfmpegInputSource(input.inputUri) }.getOrNull() ?: return null
+        val tempFrameFile = runCatching {
+            File.createTempFile("contact_sheet_frame_", ".jpg", cacheDir)
+        }.getOrNull()
+        if (tempFrameFile == null) {
+            inputSource.close()
+            return null
+        }
+
+        var session: FFmpegSession? = null
+        try {
+            if (ConversionTaskStore.isCancelled()) return null
+
+            val sec = String.format(Locale.US, "%.3f", (timeMs.coerceAtLeast(0L)) / 1000.0)
+            val arguments = listOf(
+                "-hide_banner",
+                "-loglevel", "error",
+                "-ss", sec,
+                "-i", inputSource.path,
+                "-map", "0:v:0",
+                "-an", "-sn", "-dn",
+                "-frames:v", "1",
+                "-vf", "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease",
+                "-f", "image2",
+                "-c:v", "mjpeg",
+                "-q:v", "2",
+                "-y",
+                tempFrameFile.absolutePath
+            )
+
+            val latch = CountDownLatch(1)
+            var success = false
+            session = FFmpegKit.executeWithArgumentsAsync(
+                arguments.toTypedArray(),
+                { completedSession ->
+                    success = ReturnCode.isSuccess(completedSession.getReturnCode())
+                    latch.countDown()
+                }
+            )
+            activeFfmpegSession = session
+            if (ConversionTaskStore.isCancelled()) {
+                runCatching { FFmpegKit.cancel(session.getSessionId()) }
+                return null
+            }
+            try {
+                val completed = latch.await(10, TimeUnit.SECONDS)
+                if (!completed) {
+                    runCatching { FFmpegKit.cancel(session.getSessionId()) }
+                }
+            } finally {
+                if (activeFfmpegSession == session) {
+                    activeFfmpegSession = null
+                }
+            }
+
+            if (ConversionTaskStore.isCancelled()) {
+                return null
+            }
+
+            if (success && tempFrameFile.length() > 0L) {
+                return BitmapFactory.decodeFile(tempFrameFile.absolutePath)
+            } else {
+                Log.w(
+                    TAG,
+                    "extractFrameWithFfmpeg failed for timeMs=$timeMs rc=${session.getReturnCode()} " +
+                        "logs=${session.getAllLogsAsString()?.take(500)}"
+                )
+            }
+            return null
+        } catch (e: Exception) {
+            Log.w(TAG, "extractFrameWithFfmpeg exception for timeMs=$timeMs", e)
+            return null
+        } finally {
+            if (activeFfmpegSession == session) {
+                activeFfmpegSession = null
+            }
+            tempFrameFile.delete()
+            inputSource.close()
+        }
+    }
+
+    private fun parseFpsString(fps: String): Float? {
+        val trimmed = fps.trim()
+        if (trimmed.contains('/')) {
+            val parts = trimmed.split('/')
+            if (parts.size == 2) {
+                val num = parts[0].toFloatOrNull()
+                val den = parts[1].toFloatOrNull()
+                if (num != null && den != null && den > 0f) {
+                    return (num / den).takeIf { it in 1.0f..240.0f }
+                }
+            }
+        }
+        return trimmed.toFloatOrNull()?.takeIf { it in 1.0f..240.0f }
     }
 
     private fun formatFileSize(bytes: Long): String {
@@ -3426,6 +3693,16 @@ class ConversionService : Service() {
                 message = message
             )
         }
+        val metadataPreparation = prepareAudioMetadataFor(input)
+        metadataPreparation.failure?.let { failure ->
+            return@withContext FfmpegRunResult(
+                success = false,
+                cancelled = false,
+                message = failure,
+                outputTail = metadataPreparation.diagnostic
+            )
+        }
+        val audioMetadata = metadataPreparation.snapshot
         if (input.category == ConversionMediaCategory.Video &&
             input.videoOptions.frameInterpolation == VideoFrameInterpolationMode.Rife2x
         ) {
@@ -3492,7 +3769,8 @@ class ConversionService : Service() {
                         inputPath = segInputSource.path,
                         outputFile = partTempFile,
                         durationMs = segment.effectiveDurationMs,
-                        trimWindow = segTrimWindow
+                        trimWindow = segTrimWindow,
+                        audioMetadata = audioMetadata
                     )
                     val segStartProgress = (i.toFloat() / segmentCount.toFloat()) * FFMPEG_MAX_PROGRESS_BEFORE_SAVE
                     val segEndProgress = ((i + 1).toFloat() / segmentCount.toFloat()) * FFMPEG_MAX_PROGRESS_BEFORE_SAVE
@@ -3518,6 +3796,17 @@ class ConversionService : Service() {
                     segmentTempFiles.forEach { it.delete() }
                     return@withContext partResult
                 }
+                val metadataResult = finalizeAudioOutput(
+                    input,
+                    partTempFile,
+                    audioMetadata,
+                    dropChapters = segTrimWindow.isTrimmed
+                )
+                if (!metadataResult.success) {
+                    partTempFile.delete()
+                    segmentTempFiles.forEach { it.delete() }
+                    return@withContext metadataResult
+                }
                 segmentTempFiles.add(partTempFile)
             }
             return@withContext FfmpegRunResult(
@@ -3538,9 +3827,15 @@ class ConversionService : Service() {
                 inputPath = inputSource.path,
                 outputFile = tempFile,
                 durationMs = effectiveDurationMs,
-                trimWindow = trimWindow
+                trimWindow = trimWindow,
+                audioMetadata = audioMetadata
             )
-            executeFfmpeg(input, arguments, effectiveDurationMs, logTail, inputSource.label)
+            val result = executeFfmpeg(input, arguments, effectiveDurationMs, logTail, inputSource.label)
+            if (!result.success || result.cancelled) {
+                result
+            } else {
+                finalizeAudioOutput(input, tempFile, audioMetadata, dropChapters = trimWindow.isTrimmed)
+            }
         } finally {
             inputSource.close()
         }
@@ -3721,16 +4016,34 @@ class ConversionService : Service() {
                 "-framerate", String.format(Locale.US, "%.3f", targetFps),
                 "-i", framePatternOut
             )
+            val videoProfile = ffmpegVideoProfileFor(input)
+            val isWebm = videoProfile?.format == "webm"
             if (tempAudioFile.exists() && tempAudioFile.length() > 0) {
-                encodeArgs.addAll(listOf("-i", tempAudioFile.absolutePath, "-c:a", "aac", "-b:a", "192k"))
+                val audioCodec = if (isWebm) FFMPEG_OPUS_ENCODER else FFMPEG_AAC_ENCODER
+                encodeArgs.addAll(listOf("-i", tempAudioFile.absolutePath, "-c:a", audioCodec, "-b:a", "192k"))
             }
-            encodeArgs.addAll(listOf(
-                "-c:v", "libx264",
-                "-crf", "18",
-                "-preset", "medium",
-                "-pix_fmt", "yuv420p",
-                tempFile.absolutePath
-            ))
+            if (isWebm) {
+                encodeArgs.addAll(listOf(
+                    "-c:v", FFMPEG_VIDEO_ENCODER_VP9,
+                    "-deadline", "realtime",
+                    "-cpu-used", "4",
+                    "-row-mt", "1",
+                    "-threads", Runtime.getRuntime().availableProcessors().coerceIn(1, 8).toString(),
+                    "-b:v", "0",
+                    "-crf", "24",
+                    "-pix_fmt", "yuv420p",
+                    "-f", "webm",
+                    tempFile.absolutePath
+                ))
+            } else {
+                encodeArgs.addAll(listOf(
+                    "-c:v", "libx264",
+                    "-crf", "18",
+                    "-preset", "medium",
+                    "-pix_fmt", "yuv420p",
+                    tempFile.absolutePath
+                ))
+            }
 
             val encodeResult = executeFfmpeg(
                 input = input,
@@ -3802,8 +4115,10 @@ class ConversionService : Service() {
             // Determine output video dimensions
             val firstUri = inputUris.first()
             val rawSourceSize = input.inputInfo?.let {
-                if (it.width != null && it.height != null && it.width > 0 && it.height > 0) {
-                    VideoSize(it.width, it.height)
+                val width = it.width
+                val height = it.height
+                if (width != null && height != null && width > 0 && height > 0) {
+                    VideoSize(width, height)
                 } else null
             } ?: readVideoSize(firstUri) ?: VideoSize(1920, 1080)
 
@@ -3816,6 +4131,9 @@ class ConversionService : Service() {
             val targetW = (baseSize.width / 2) * 2
             val targetH = (baseSize.height / 2) * 2
 
+            val isWebm = videoProfile.format == "webm"
+            val mergeSampleRate = if (isWebm) 48000 else 44100
+
             // Build filter_complex
             val filterComplex = buildString {
                 for (i in inputSources.indices) {
@@ -3825,10 +4143,10 @@ class ConversionService : Service() {
 
                     if (includeAudio) {
                         if (inputAudioFlags[i]) {
-                            append("[$i:a:0]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a$i];")
+                            append("[$i:a:0]aformat=sample_fmts=fltp:sample_rates=$mergeSampleRate:channel_layouts=stereo[a$i];")
                         } else {
                             val durSec = (inputDurations[i].toDouble() / 1000.0).coerceAtLeast(0.1)
-                            append("aevalsrc=0:d=$durSec:s=44100:c=stereo[a$i];")
+                            append("aevalsrc=0:d=$durSec:s=$mergeSampleRate:c=stereo[a$i];")
                         }
                     }
                 }
@@ -3867,16 +4185,36 @@ class ConversionService : Service() {
                 if (!includeAudio) {
                     add("-an")
                 }
+                val isVpx = videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP9 ||
+                    videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP8
                 add("-c:v")
                 add(videoProfile.videoCodec)
                 add("-pix_fmt")
                 add(videoProfile.pixelFormat)
-                add("-preset")
-                add(videoProfile.preset)
+                if (isVpx) {
+                    add("-deadline")
+                    add("realtime")
+                    add("-cpu-used")
+                    add("4")
+                    if (videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP9) {
+                        add("-row-mt")
+                        add("1")
+                    }
+                    add("-threads")
+                    add(Runtime.getRuntime().availableProcessors().coerceIn(1, 8).toString())
+                }
+                if (videoProfile.preset != null) {
+                    add("-preset")
+                    add(videoProfile.preset)
+                }
                 input.videoOptions.videoBitrate?.let { bitrate ->
                     add("-b:v")
                     add(bitrate.toString())
                 } ?: run {
+                    if (isVpx) {
+                        add("-b:v")
+                        add("0")
+                    }
                     add("-crf")
                     add(videoProfile.crf)
                 }
@@ -3892,7 +4230,7 @@ class ConversionService : Service() {
                 }
                 if (includeAudio) {
                     add("-c:a")
-                    add(FFMPEG_AAC_ENCODER)
+                    add(if (isWebm) FFMPEG_OPUS_ENCODER else FFMPEG_AAC_ENCODER)
                     if (videoAudioOptions.audioBitrate != null) {
                         add("-b:a")
                         add(videoAudioOptions.audioBitrate.toString())
@@ -4172,12 +4510,224 @@ class ConversionService : Service() {
         }.getOrNull()
     }
 
+    private data class AudioMetadataPreparation(
+        val snapshot: AudioMetadataCodec.AudioMetadataSnapshot? = null,
+        val failure: LocalizedText? = null,
+        val diagnostic: String? = null
+    )
+
+    private suspend fun prepareAudioMetadataFor(input: ConversionTaskInput): AudioMetadataPreparation {
+        if (input.category != ConversionMediaCategory.Audio) return AudioMetadataPreparation()
+        val strict = audioTargetExtensionFor(input.targetFormat) in setOf("mp3", "opus", "flac")
+        val source = openFfmpegInputSource(input.inputUri)
+            ?: return AudioMetadataPreparation(failure = if (strict) localizedText(R.string.message_audio_metadata_probe_failed) else null)
+        var coverFile: File? = null
+        try {
+            val information = FFprobeKit.getMediaInformation(source.path, FFMPEG_MEDIA_INFORMATION_PROBE_TIMEOUT_MS).getMediaInformation()
+                ?: return AudioMetadataPreparation(failure = if (strict) localizedText(R.string.message_audio_metadata_probe_failed) else null)
+            val streams = information.getStreams().orEmpty()
+            val audio = streams.firstOrNull { it.getType().equals("audio", true) }
+            val tags = listOfNotNull(audio?.getTags(), information.getTags()).flatMap { it.metadataEntries() }
+            val generic = AudioMetadataCodec.snapshotFromTags(tags)
+            // Native readers preserve USLT language/description which FFprobe can normalize away.
+            // FFmpegKit SAF parameters (saf:...) are not filesystem paths.
+            // Open a separate resolver stream so probing/encoding keeps its
+            // own descriptor and cursor, including with non-local providers.
+            val native = if (strict) {
+                val stream = contentResolver.openInputStream(input.inputUri)
+                    ?: error("source-metadata-stream-unavailable")
+                stream.buffered().use { AudioMetadataCodec.readSource(it) }
+            } else null
+            val pictures = streams.filter { stream ->
+                stream.getType().equals("video", true) &&
+                    (stream.getNumberProperty("disposition.attached_pic") == 1L ||
+                        stream.getAllProperties()?.optJSONObject("disposition")?.optInt("attached_pic", 0) == 1)
+            }
+            val picture = pictures.firstOrNull { stream ->
+                stream.getTags()?.optString("comment").orEmpty().contains("front", true)
+            } ?: pictures.firstOrNull()
+            var cover = native?.cover
+            if (strict && cover == null && picture != null) {
+                val index = picture.getIndex() ?: error("cover-stream-index-missing")
+                val extracted = File.createTempFile("audio-cover-", ".img", externalCacheDir ?: cacheDir)
+                coverFile = extracted
+                val result = executeFfmpeg(
+                    input = input,
+                    arguments = listOf(
+                        "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", source.path,
+                        "-map", "0:$index", "-frames:v", "1", "-c:v", "copy",
+                        "-f", "image2", "-update", "1", extracted.absolutePath
+                    ),
+                    durationMs = null,
+                    logTail = mutableListOf(),
+                    inputSourceLabel = "extract-audio-cover",
+                    progressStart = 0f, progressEnd = 0f
+                )
+                if (result.cancelled || ConversionTaskStore.isCancelled()) throw CancellationException()
+                if (result.success && extracted.length() in 1..AudioMetadataCodec.MAX_COVER_BYTES) {
+                    cover = AudioMetadataCodec.coverFromBytes(extracted.readBytes())
+                }
+                if (cover == null) {
+                    Log.e(TAG, "Source audio cover extraction/validation failed")
+                    return AudioMetadataPreparation(failure = localizedText(R.string.message_audio_metadata_cover_extraction_failed))
+                }
+            }
+            val snapshot = generic.copy(
+                fields = generic.fields + native?.fields.orEmpty(),
+                lyrics = native?.lyrics ?: generic.lyrics,
+                cover = cover,
+                pictureStreamIndex = if (strict) picture?.getIndex() else null,
+                flacStreamInfo = native?.flacStreamInfo
+            )
+            Log.i(TAG, "Audio metadata source fields=${snapshot.fields.keys} lyrics=${snapshot.lyrics != null} " +
+                "cover=${cover?.mimeType ?: "none"} coverBytes=${cover?.bytes?.size ?: 0} coverHash=${cover?.sha256 ?: "none"}")
+            return AudioMetadataPreparation(snapshot = snapshot)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            // Never log source text/lyrics: parsers use fixed diagnostic codes.
+            val diagnostic = "source-metadata:${exception.javaClass.simpleName}"
+            Log.e(TAG, "Audio metadata preparation failed code=$diagnostic")
+            return AudioMetadataPreparation(
+                failure = if (strict) localizedText(R.string.message_audio_metadata_probe_failed) else null,
+                diagnostic = diagnostic
+            )
+        } finally {
+            coverFile?.delete()
+            source.close()
+        }
+    }
+
+    private fun JSONObject.metadataEntries(): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+        val iterator = keys()
+        while (iterator.hasNext()) {
+            val key = iterator.next()
+            val value = optString(key).takeIf { it.isNotBlank() } ?: continue
+            result += key to value
+        }
+        return result
+    }
+
+    private suspend fun finalizeAudioOutput(
+        input: ConversionTaskInput,
+        outputFile: File,
+        snapshot: AudioMetadataCodec.AudioMetadataSnapshot?,
+        dropChapters: Boolean
+    ): FfmpegRunResult {
+        if (ConversionTaskStore.isCancelled()) return FfmpegRunResult(success = false, cancelled = true)
+        val target = audioTargetExtensionFor(input.targetFormat)
+            ?: return FfmpegRunResult(success = true, cancelled = false)
+        if (input.category != ConversionMediaCategory.Audio || snapshot == null ||
+            target !in setOf("mp3", "opus", "flac")) {
+            return FfmpegRunResult(success = true, cancelled = false)
+        }
+        var verification = verifyAudioOutput(target, outputFile, snapshot)
+        if (!verification.success && target in setOf("opus", "flac")) {
+            verification = remuxAudioMetadata(input, outputFile, target, snapshot, dropChapters)
+        }
+        if (ConversionTaskStore.isCancelled()) return FfmpegRunResult(success = false, cancelled = true)
+        snapshot.flacStreamInfo?.let { sourceInfo ->
+            if (verification.success && target == "flac" && !input.audioOptions.trimRange.isEnabled &&
+                !input.audioOptions.advanced.hasEnabledEffects &&
+                (input.audioOptions.sampleRateHz == null || input.audioOptions.sampleRateHz == AudioMetadataCodec.flacSampleRate(sourceInfo)) &&
+                (input.audioOptions.channelCount == null || input.audioOptions.channelCount == AudioMetadataCodec.flacChannels(sourceInfo))) {
+                verification = AudioMetadataCodec.verifyFlacPcm(outputFile, sourceInfo)
+            }
+        }
+        Log.i(TAG, "Audio metadata output target=$target verified=${verification.success} diagnostic=${verification.diagnostic.orEmpty()}")
+        return if (verification.success) FfmpegRunResult(success = true, cancelled = false) else FfmpegRunResult(
+            success = false,
+            cancelled = false,
+            message = localizedText(
+                if (verification.diagnostic?.startsWith("mp3-repair") == true ||
+                    verification.diagnostic?.startsWith("metadata-remux") == true
+                ) R.string.message_audio_metadata_repair_failed
+                else R.string.message_audio_metadata_verification_failed
+            ),
+            outputTail = verification.diagnostic
+        )
+    }
+
+    private fun verifyAudioOutput(
+        target: String,
+        file: File,
+        snapshot: AudioMetadataCodec.AudioMetadataSnapshot
+    ): AudioMetadataCodec.Verification = when (target) {
+        "mp3" -> AudioMetadataCodec.repairAndVerifyMp3(file, snapshot) { ConversionTaskStore.isCancelled() }
+        "opus" -> AudioMetadataCodec.verifyOpus(file, snapshot)
+        "flac" -> AudioMetadataCodec.verifyFlac(file, snapshot)
+        else -> AudioMetadataCodec.Verification(true)
+    }
+
+    private suspend fun remuxAudioMetadata(
+        input: ConversionTaskInput,
+        outputFile: File,
+        target: String,
+        snapshot: AudioMetadataCodec.AudioMetadataSnapshot,
+        dropChapters: Boolean
+    ): AudioMetadataCodec.Verification {
+        val remuxFile = File(outputFile.parentFile ?: cacheDir, "${outputFile.name}.metadata-remux-${System.nanoTime()}.$target")
+        var coverFile: File? = null
+        try {
+            val before = AudioMetadataCodec.audioFingerprint(outputFile, target) { ConversionTaskStore.isCancelled() }
+            val arguments = mutableListOf("-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", outputFile.absolutePath)
+            if (target == "flac" && snapshot.cover != null) {
+                // A Vorbis comment named METADATA_BLOCK_PICTURE is not a native FLAC picture block.
+                val cover = snapshot.cover
+                val extracted = File.createTempFile("audio-remux-cover-", if (cover.mimeType == "image/png") ".png" else ".jpg", outputFile.parentFile ?: cacheDir)
+                coverFile = extracted
+                extracted.writeBytes(cover.bytes)
+                arguments += listOf("-i", extracted.absolutePath)
+            }
+            arguments += listOf(
+                "-map", "0:a:0", "-sn", "-dn", "-map_metadata", "0",
+                "-map_metadata:s:a:0", "0:s:a:0", "-map_chapters", if (dropChapters) "-1" else "0"
+            )
+            if (coverFile != null) {
+                arguments += listOf("-map", "1:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic",
+                    "-metadata:s:v:0", "title=Album cover", "-metadata:s:v:0", "comment=Cover (front)")
+            } else {
+                arguments += "-vn"
+            }
+            // Ogg merges globals with AV_DICT_DONT_OVERWRITE. Override both
+            // dictionaries so a stale stream-level value cannot win. This
+            // produces one comment per key, not duplicate OpusTags entries.
+            addAudioMetadataArguments(arguments, snapshot, includePicture = target == "opus")
+            arguments += listOf("-c:a", "copy", "-f", target, remuxFile.absolutePath)
+            val result = executeFfmpeg(
+                input = input, arguments = arguments, durationMs = null, logTail = mutableListOf(),
+                inputSourceLabel = "metadata-remux", progressStart = FFMPEG_MAX_PROGRESS_BEFORE_SAVE,
+                progressEnd = FFMPEG_MAX_PROGRESS_BEFORE_SAVE
+            )
+            if (result.cancelled || ConversionTaskStore.isCancelled()) throw CancellationException()
+            if (!result.success || !remuxFile.isFile || remuxFile.length() == 0L) {
+                return AudioMetadataCodec.Verification(false, "metadata-remux:ffmpeg-failed")
+            }
+            val verified = verifyAudioOutput(target, remuxFile, snapshot)
+            if (!verified.success) return verified
+            val after = AudioMetadataCodec.audioFingerprint(remuxFile, target) { ConversionTaskStore.isCancelled() }
+            if (before != after) return AudioMetadataCodec.Verification(false, "metadata-remux:audio-payload-changed")
+            Log.i(TAG, "Audio metadata remux verified target=$target audioHash=$after")
+            AudioMetadataCodec.replaceVerified(remuxFile, outputFile)
+            return AudioMetadataCodec.Verification(true)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            return AudioMetadataCodec.Verification(false, "metadata-remux:${exception.javaClass.simpleName}")
+        } finally {
+            remuxFile.delete()
+            coverFile?.delete()
+        }
+    }
+
     private fun ffmpegArgumentsFor(
         input: ConversionTaskInput,
         inputPath: String,
         outputFile: File,
         durationMs: Long?,
-        trimWindow: FfmpegTrimWindow
+        trimWindow: FfmpegTrimWindow,
+        audioMetadata: AudioMetadataCodec.AudioMetadataSnapshot? = null
     ): List<String> {
         return when (input.category) {
             ConversionMediaCategory.Video -> ffmpegVideoArgumentsFor(
@@ -4192,18 +4742,53 @@ class ConversionService : Service() {
                     ?: throw LocalizedFailure(localizedText(R.string.message_unsupported_audio_target_1_s, input.targetFormat))
                 add("-hide_banner")
                 add("-nostdin")
+                add("-loglevel")
+                add("error")
                 add("-y")
                 addFfmpegTrimInputOptions(trimWindow)
                 add("-i")
                 add(inputPath)
                 add("-map")
                 add("0:a:0")
-                add("-vn")
+                if (audioProfile.supportsAttachedPicture) {
+                    // Audio containers that define an attached-picture metadata
+                    // representation (ID3 APIC, MP4 covr, FLAC picture blocks,
+                    // or another supported native picture item) expose the
+                    // cover as a video stream with the attached_pic
+                    // disposition. Map only that disposition so a video
+                    // selected in the Audio lane never drags its real video
+                    // track into the output. Ogg Opus uses the separate
+                    // METADATA_BLOCK_PICTURE path below.
+                    add("-map")
+                    add(audioMetadata?.pictureStreamIndex?.let { "0:$it" } ?: "0:v:disp:attached_pic?")
+                    add("-c:v")
+                    add("copy")
+                } else {
+                    add("-vn")
+                }
                 add("-sn")
                 add("-dn")
+                add("-map_metadata")
+                add("0")
+                // Global tags carry the common artist/title/album/lyrics
+                // fields. Keep stream-level tags (for example a language or
+                // track title) attached to the one audio stream as well.
+                add("-map_metadata:s:a:0")
+                add("0:s:a:0")
+                add("-map_chapters")
+                add(if (trimWindow.isTrimmed) "-1" else "0")
+                audioMetadata?.let { snapshot ->
+                    addAudioMetadataArguments(this, snapshot, includePicture = false)
+                }
                 add("-c:a")
                 add(audioProfile.codec)
                 addFfmpegAudioOptions(input.audioOptions, audioProfile, durationMs)
+                if (audioProfile.codec == FFMPEG_FLAC_ENCODER) {
+                    audioMetadata?.flacStreamInfo?.let { info ->
+                        add("-bits_per_raw_sample")
+                        add(AudioMetadataCodec.flacBitDepth(info).toString())
+                    }
+                }
                 if (audioProfile.useFastStart) {
                     add("-movflags")
                     add("+faststart")
@@ -4217,6 +4802,25 @@ class ConversionService : Service() {
             ConversionMediaCategory.Document -> throw LocalizedFailure(localizedText(R.string.message_compatibility_engine_is_not_connected_for_documents))
             ConversionMediaCategory.Font -> throw LocalizedFailure(localizedText(R.string.message_compatibility_engine_is_not_connected_for_fonts))
             ConversionMediaCategory.Subtitle -> throw LocalizedFailure(localizedText(R.string.ui_failed))
+        }
+    }
+
+
+    private fun addAudioMetadataArguments(
+        arguments: MutableList<String>,
+        snapshot: AudioMetadataCodec.AudioMetadataSnapshot,
+        includePicture: Boolean
+    ) {
+        fun addTag(key: String, value: String) {
+            arguments += listOf("-metadata", "$key=$value", "-metadata:s:a:0", "$key=$value")
+        }
+        snapshot.fields.forEach { (key, value) -> addTag(key, value) }
+        snapshot.lyrics?.let { lyrics ->
+            addTag("lyrics", lyrics.text)
+            if (lyrics.commentKey != "lyrics") addTag(lyrics.commentKey, lyrics.text)
+        }
+        if (includePicture) snapshot.cover?.let { cover ->
+            addTag("METADATA_BLOCK_PICTURE", AudioMetadataCodec.opusPictureMetadata(cover))
         }
     }
 
@@ -4253,16 +4857,37 @@ class ConversionService : Service() {
             if (!includeAudio) {
                 add("-an")
             }
+            val isVpx = videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP9 ||
+                videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP8
+            val isWebm = videoProfile.format == "webm"
             add("-c:v")
             add(videoProfile.videoCodec)
             add("-pix_fmt")
             add(videoProfile.pixelFormat)
-            add("-preset")
-            add(videoProfile.preset)
+            if (isVpx) {
+                add("-deadline")
+                add("realtime")
+                add("-cpu-used")
+                add("4")
+                if (videoProfile.videoCodec == FFMPEG_VIDEO_ENCODER_VP9) {
+                    add("-row-mt")
+                    add("1")
+                }
+                add("-threads")
+                add(Runtime.getRuntime().availableProcessors().coerceIn(1, 8).toString())
+            }
+            if (videoProfile.preset != null) {
+                add("-preset")
+                add(videoProfile.preset)
+            }
             input.videoOptions.videoBitrate?.let { bitrate ->
                 add("-b:v")
                 add(bitrate.toString())
             } ?: run {
+                if (isVpx) {
+                    add("-b:v")
+                    add("0")
+                }
                 add("-crf")
                 add(videoProfile.crf)
             }
@@ -4286,10 +4911,10 @@ class ConversionService : Service() {
             }
             if (includeAudio) {
                 add("-c:a")
-                add(FFMPEG_AAC_ENCODER)
+                add(if (isWebm) FFMPEG_OPUS_ENCODER else FFMPEG_AAC_ENCODER)
                 addFfmpegAudioOptions(
                     audioOptions = videoAudioOptions,
-                    audioProfile = ffmpegAacAudioProfile(),
+                    audioProfile = if (isWebm) ffmpegOpusAudioProfile() else ffmpegAacAudioProfile(),
                     durationMs = durationMs,
                     forceReverse = input.videoOptions.compressionMode == VideoCompressionMode.Standard &&
                         !isInterpolationActive &&
@@ -4329,9 +4954,17 @@ class ConversionService : Service() {
             add(filter)
         }
         if (audioProfile.supportsBitrate) {
-            audioOptions.audioBitrate?.let { bitrate ->
-                add("-b:a")
-                add(bitrate.toString())
+            if (
+                audioProfile.codec == FFMPEG_MP3_ENCODER &&
+                    audioOptions.mp3BitrateMode == Mp3BitrateMode.Vbr
+            ) {
+                add("-q:a")
+                add(audioOptions.mp3VbrQuality.coerceIn(MP3_VBR_QUALITY_MIN, MP3_VBR_QUALITY_MAX).toString())
+            } else {
+                audioOptions.audioBitrate?.let { bitrate ->
+                    add("-b:a")
+                    add(bitrate.toString())
+                }
             }
         }
         if (audioProfile.supportsSampleRate) {
@@ -4379,7 +5012,16 @@ class ConversionService : Service() {
             codec = FFMPEG_AAC_ENCODER,
             format = "ipod",
             useFastStart = true,
-            requiredEncoder = FFMPEG_AAC_ENCODER
+            requiredEncoder = FFMPEG_AAC_ENCODER,
+            supportsAttachedPicture = true
+        )
+    }
+
+    private fun ffmpegOpusAudioProfile(): FfmpegAudioProfile {
+        return FfmpegAudioProfile(
+            codec = FFMPEG_OPUS_ENCODER,
+            format = "opus",
+            requiredEncoder = FFMPEG_OPUS_ENCODER
         )
     }
 
@@ -4450,9 +5092,20 @@ class ConversionService : Service() {
 
     private fun ffmpegVideoProfileFor(input: ConversionTaskInput): FfmpegVideoProfile? {
         val targetExtension = videoTargetExtensionFor(input.targetFormat) ?: return null
-        val videoCodec = when (input.videoOptions.videoMimeType) {
-            VideoExportOptions.VIDEO_MIME_TYPE_H265 -> FFMPEG_VIDEO_ENCODER_H265
-            else -> FFMPEG_VIDEO_ENCODER_H264
+        val videoCodec = when (targetExtension) {
+            "webm" -> {
+                if (input.videoOptions.videoMimeType == VideoExportOptions.VIDEO_MIME_TYPE_VP8) {
+                    FFMPEG_VIDEO_ENCODER_VP8
+                } else {
+                    FFMPEG_VIDEO_ENCODER_VP9
+                }
+            }
+            else -> {
+                when (input.videoOptions.videoMimeType) {
+                    VideoExportOptions.VIDEO_MIME_TYPE_H265 -> FFMPEG_VIDEO_ENCODER_H265
+                    else -> FFMPEG_VIDEO_ENCODER_H264
+                }
+            }
         }
         return when (targetExtension) {
             "mp4" -> FfmpegVideoProfile(
@@ -4477,6 +5130,12 @@ class ConversionService : Service() {
                 preset = videoPresetFor(input.videoOptions.compressionMode),
                 crf = videoCrfFor(videoCodec, input.videoOptions.compressionMode)
             )
+            "webm" -> FfmpegVideoProfile(
+                videoCodec = videoCodec,
+                format = "webm",
+                preset = null,
+                crf = videoCrfFor(videoCodec, input.videoOptions.compressionMode)
+            )
             else -> null
         }
     }
@@ -4494,34 +5153,34 @@ class ConversionService : Service() {
         return when (compressionMode) {
             VideoCompressionMode.Standard -> defaultVideoCrfFor(videoCodec)
             VideoCompressionMode.VisualLossless -> {
-                if (videoCodec == FFMPEG_VIDEO_ENCODER_H265) {
-                    FFMPEG_VISUAL_LOSSLESS_CRF_H265
-                } else {
-                    FFMPEG_VISUAL_LOSSLESS_CRF_H264
+                when (videoCodec) {
+                    FFMPEG_VIDEO_ENCODER_H265 -> FFMPEG_VISUAL_LOSSLESS_CRF_H265
+                    FFMPEG_VIDEO_ENCODER_VP9, FFMPEG_VIDEO_ENCODER_VP8 -> FFMPEG_VISUAL_LOSSLESS_CRF_VP9
+                    else -> FFMPEG_VISUAL_LOSSLESS_CRF_H264
                 }
             }
             VideoCompressionMode.BalancedShrink -> {
-                if (videoCodec == FFMPEG_VIDEO_ENCODER_H265) {
-                    FFMPEG_BALANCED_SHRINK_CRF_H265
-                } else {
-                    FFMPEG_BALANCED_SHRINK_CRF_H264
+                when (videoCodec) {
+                    FFMPEG_VIDEO_ENCODER_H265 -> FFMPEG_BALANCED_SHRINK_CRF_H265
+                    FFMPEG_VIDEO_ENCODER_VP9, FFMPEG_VIDEO_ENCODER_VP8 -> FFMPEG_BALANCED_SHRINK_CRF_VP9
+                    else -> FFMPEG_BALANCED_SHRINK_CRF_H264
                 }
             }
             VideoCompressionMode.SmallFile -> {
-                if (videoCodec == FFMPEG_VIDEO_ENCODER_H265) {
-                    FFMPEG_SMALL_FILE_CRF_H265
-                } else {
-                    FFMPEG_SMALL_FILE_CRF_H264
+                when (videoCodec) {
+                    FFMPEG_VIDEO_ENCODER_H265 -> FFMPEG_SMALL_FILE_CRF_H265
+                    FFMPEG_VIDEO_ENCODER_VP9, FFMPEG_VIDEO_ENCODER_VP8 -> FFMPEG_SMALL_FILE_CRF_VP9
+                    else -> FFMPEG_SMALL_FILE_CRF_H264
                 }
             }
         }
     }
 
     private fun defaultVideoCrfFor(videoCodec: String): String {
-        return if (videoCodec == FFMPEG_VIDEO_ENCODER_H265) {
-            FFMPEG_DEFAULT_CRF_H265
-        } else {
-            FFMPEG_DEFAULT_CRF_H264
+        return when (videoCodec) {
+            FFMPEG_VIDEO_ENCODER_H265 -> FFMPEG_DEFAULT_CRF_H265
+            FFMPEG_VIDEO_ENCODER_VP9, FFMPEG_VIDEO_ENCODER_VP8 -> FFMPEG_DEFAULT_CRF_VP9
+            else -> FFMPEG_DEFAULT_CRF_H264
         }
     }
 
@@ -4727,7 +5386,8 @@ class ConversionService : Service() {
             "mp3" -> FfmpegAudioProfile(
                 codec = FFMPEG_MP3_ENCODER,
                 format = "mp3",
-                requiredEncoder = FFMPEG_MP3_ENCODER
+                requiredEncoder = FFMPEG_MP3_ENCODER,
+                supportsAttachedPicture = true
             )
             "m4a" -> ffmpegAacAudioProfile()
             "wav" -> FfmpegAudioProfile(
@@ -4740,7 +5400,8 @@ class ConversionService : Service() {
                 codec = FFMPEG_FLAC_ENCODER,
                 format = "flac",
                 supportsBitrate = false,
-                requiredEncoder = FFMPEG_FLAC_ENCODER
+                requiredEncoder = FFMPEG_FLAC_ENCODER,
+                supportsAttachedPicture = true
             )
             "wma" -> FfmpegAudioProfile(
                 codec = FFMPEG_WMA_ENCODER,
@@ -4823,13 +5484,11 @@ class ConversionService : Service() {
             },
             { log ->
                 val message = log.message
-                if (message != null) {
-                    appendFfmpegLogTail(logTail, message)
-                    ffmpegProgressFromMessage(message, durationMs)?.let { progress ->
-                        updateCompatibilityProgress(
-                            scaledFfmpegProgress(progress, progressStart, progressEnd)
-                        )
-                    }
+                appendFfmpegLogTail(logTail, message)
+                ffmpegProgressFromMessage(message, durationMs)?.let { progress ->
+                    updateCompatibilityProgress(
+                        scaledFfmpegProgress(progress, progressStart, progressEnd)
+                    )
                 }
             },
             { statistics ->
@@ -5208,7 +5867,7 @@ class ConversionService : Service() {
                     buildList {
                         add(profile.videoCodec)
                         if (audioOptions.advanced.volume != AudioVolumeMode.Mute) {
-                            add(FFMPEG_AAC_ENCODER)
+                            add(if (profile.format == "webm") FFMPEG_OPUS_ENCODER else FFMPEG_AAC_ENCODER)
                         }
                     }
                 }
@@ -5322,6 +5981,10 @@ class ConversionService : Service() {
                 localizedText(R.string.text_task_message_compatibility_engine_needs_an_h_264_capable_ffmpeg_package)
             encoder == FFMPEG_VIDEO_ENCODER_H265 ->
                 localizedText(R.string.text_task_message_compatibility_engine_needs_an_h_265_capable_ffmpeg_package)
+            encoder == FFMPEG_VIDEO_ENCODER_VP9 ->
+                localizedText(R.string.text_task_message_compatibility_engine_needs_a_vp9_capable_ffmpeg_package)
+            encoder == FFMPEG_VIDEO_ENCODER_VP8 ->
+                localizedText(R.string.text_task_message_compatibility_engine_needs_a_vp8_capable_ffmpeg_package)
             encoder == FFMPEG_AAC_ENCODER ->
                 localizedText(R.string.text_task_message_compatibility_engine_needs_an_aac_capable_ffmpeg_package)
             encoder == FFMPEG_WAV_ENCODER ->
@@ -5431,6 +6094,7 @@ class ConversionService : Service() {
             ConversionMediaCategory.Video -> when (videoTargetExtensionFor(input.targetFormat)) {
                 "mkv" -> localizedText(R.string.text_task_message_compatibility_engine_could_not_transcode_this_file_to_mkv)
                 "mov" -> localizedText(R.string.text_task_message_compatibility_engine_could_not_transcode_this_file_to_mov)
+                "webm" -> localizedText(R.string.text_task_message_compatibility_engine_could_not_transcode_this_file_to_webm)
                 "gif" -> localizedText(R.string.text_task_message_compatibility_engine_could_not_create_this_gif)
                 else -> localizedText(R.string.text_task_message_compatibility_engine_could_not_transcode_this_file_to_mp4)
             }
@@ -5715,10 +6379,17 @@ class ConversionService : Service() {
 
     private fun formatFfmpegArguments(arguments: List<String>): String {
         return arguments.joinToString(separator = " ") { argument ->
-            if (argument.any { it.isWhitespace() }) {
-                "\"${argument.replace("\"", "\\\"")}\""
+            val logSafeArgument = when {
+                argument.startsWith("METADATA_BLOCK_PICTURE=") ->
+                    "METADATA_BLOCK_PICTURE=<redacted:${argument.length}>"
+                argument.substringBefore('=').lowercase(Locale.US).startsWith("lyrics") ->
+                    "${argument.substringBefore('=')}=<redacted:${argument.length}>"
+                else -> argument
+            }
+            if (logSafeArgument.any { it.isWhitespace() }) {
+                "\"${logSafeArgument.replace("\"", "\\\"")}\""
             } else {
-                argument
+                logSafeArgument
             }
         }
     }
@@ -6450,6 +7121,7 @@ class ConversionService : Service() {
                     "mp4" -> OutputProfile(extension = "mp4", mimeType = MIME_TYPE_MP4, kind = OutputMediaKind.Video)
                     "mkv" -> OutputProfile(extension = "mkv", mimeType = MIME_TYPE_MKV, kind = OutputMediaKind.Video)
                     "mov" -> OutputProfile(extension = "mov", mimeType = MIME_TYPE_MOV, kind = OutputMediaKind.Video)
+                    "webm" -> OutputProfile(extension = "webm", mimeType = MIME_TYPE_WEBM, kind = OutputMediaKind.Video)
                     "gif" -> OutputProfile(extension = "gif", mimeType = MIME_TYPE_GIF, kind = OutputMediaKind.Image)
                     "jpg" -> OutputProfile(extension = "jpg", mimeType = MIME_TYPE_JPEG, kind = OutputMediaKind.Image)
                     "png" -> OutputProfile(extension = "png", mimeType = MIME_TYPE_PNG, kind = OutputMediaKind.Image)
@@ -6562,6 +7234,7 @@ class ConversionService : Service() {
             normalized.contains("mp4") -> "mp4"
             normalized.contains("mkv") -> "mkv"
             normalized.contains("mov") -> "mov"
+            normalized.contains("webm") -> "webm"
             normalized.contains("gif") -> "gif"
             else -> null
         }
@@ -6622,7 +7295,7 @@ class ConversionService : Service() {
         val format: String,
         val useFastStart: Boolean = false,
         val pixelFormat: String = "yuv420p",
-        val preset: String = "veryfast",
+        val preset: String? = "veryfast",
         val crf: String,
         val videoTag: String? = null
     )
@@ -6634,8 +7307,10 @@ class ConversionService : Service() {
         val supportsBitrate: Boolean = true,
         val supportsSampleRate: Boolean = true,
         val supportsChannelCount: Boolean = true,
+        val supportsAttachedPicture: Boolean = false,
         val requiredEncoder: String? = null
     )
+
 
     private data class FfmpegRunResult(
         val success: Boolean,
@@ -6669,6 +7344,12 @@ class ConversionService : Service() {
         val durationLimitMs: Long? get() = segments.firstOrNull()?.durationLimitMs
         val effectiveDurationMs: Long? get() = segments.firstOrNull()?.effectiveDurationMs
         val isMultiSegment: Boolean get() = segments.size > 1
+        // Chapters are source-timeline metadata. Once a task trims or splits
+        // the audio, copying them unchanged would leave chapter positions
+        // pointing at the wrong samples, so those outputs explicitly drop
+        // chapters while retaining ordinary tags and cover art.
+        val isTrimmed: Boolean
+            get() = isMultiSegment || startSeconds > 0.0 || durationLimitMs != null
     }
 
     private data class GifFrameExtraction(
@@ -6928,9 +7609,13 @@ class ConversionService : Service() {
         private const val FFMPEG_LOG_LINE_LIMIT = 600
         private const val FFMPEG_VIDEO_ENCODER_H264 = "libx264"
         private const val FFMPEG_VIDEO_ENCODER_H265 = "libx265"
+        private const val FFMPEG_VIDEO_ENCODER_VP9 = "libvpx-vp9"
+        private const val FFMPEG_VIDEO_ENCODER_VP8 = "libvpx"
         private const val FFMPEG_GIF_ENCODER = "gif"
         private const val FFMPEG_AAC_ENCODER = "aac"
         private const val FFMPEG_MP3_ENCODER = "libmp3lame"
+        private const val MP3_VBR_QUALITY_MIN = 0
+        private const val MP3_VBR_QUALITY_MAX = 9
         private const val FFMPEG_WAV_ENCODER = "pcm_s16le"
         private const val FFMPEG_FLAC_ENCODER = "flac"
         private const val FFMPEG_WMA_ENCODER = "wmav2"
@@ -6938,12 +7623,16 @@ class ConversionService : Service() {
         private val OPUS_SUPPORTED_SAMPLE_RATES = setOf(48_000, 24_000, 16_000, 12_000, 8_000)
         private const val FFMPEG_DEFAULT_CRF_H264 = "23"
         private const val FFMPEG_DEFAULT_CRF_H265 = "28"
+        private const val FFMPEG_DEFAULT_CRF_VP9 = "30"
         private const val FFMPEG_VISUAL_LOSSLESS_CRF_H264 = "18"
         private const val FFMPEG_VISUAL_LOSSLESS_CRF_H265 = "20"
+        private const val FFMPEG_VISUAL_LOSSLESS_CRF_VP9 = "24"
         private const val FFMPEG_BALANCED_SHRINK_CRF_H264 = "21"
         private const val FFMPEG_BALANCED_SHRINK_CRF_H265 = "24"
+        private const val FFMPEG_BALANCED_SHRINK_CRF_VP9 = "31"
         private const val FFMPEG_SMALL_FILE_CRF_H264 = "24"
         private const val FFMPEG_SMALL_FILE_CRF_H265 = "28"
+        private const val FFMPEG_SMALL_FILE_CRF_VP9 = "38"
         private const val FFMPEG_STANDARD_VIDEO_PRESET = "veryfast"
         private const val FFMPEG_PRESET_COMPRESSION_MEDIUM = "medium"
         private const val FFMPEG_VIDEO_REVERSE_MAX_DURATION_MS = 60_000L
@@ -6958,6 +7647,7 @@ class ConversionService : Service() {
         private const val MIME_TYPE_MP4 = "video/mp4"
         private const val MIME_TYPE_MKV = "video/x-matroska"
         private const val MIME_TYPE_MOV = "video/quicktime"
+        private const val MIME_TYPE_WEBM = "video/webm"
         private const val MIME_TYPE_MP3 = "audio/mpeg"
         private const val MIME_TYPE_M4A = "audio/mp4"
         private const val MIME_TYPE_WAV = "audio/wav"

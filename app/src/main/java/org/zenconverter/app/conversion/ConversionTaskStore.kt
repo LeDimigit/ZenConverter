@@ -29,10 +29,61 @@ data class ConversionTaskInput(
 )
 
 data class VideoContactSheetOptions(
-    val grid: ContactSheetGrid = ContactSheetGrid.Grid3x4,
+    val rows: Int = 3,
+    val columns: Int = 4,
+    val widthMode: ContactSheetWidthMode = ContactSheetWidthMode.Canvas,
+    val canvasWidthPx: Int = 2048,
+    val cellWidthPx: Int = 480,
+    val cellHeightMode: ContactSheetCellHeightMode = ContactSheetCellHeightMode.AspectRatio,
+    val cellHeightPx: Int = 270,
+    val gapPx: Int = 12,
+    val outerMarginPx: Int = 20,
+    val alignment: ContactSheetAlignment = ContactSheetAlignment.Center,
+    val fitMode: ContactSheetFitMode = ContactSheetFitMode.Crop,
+    val background: ContactSheetBackground = ContactSheetBackground.Dark,
     val includeHeader: Boolean = true,
-    val includeTimestamp: Boolean = true
-)
+    val headerHeightPx: Int = 160,
+    val includeTimestamp: Boolean = true,
+    val includeWatermark: Boolean = true
+) {
+    val frameCount: Int
+        get() = (rows.coerceIn(1, 10) * columns.coerceIn(1, 10)).coerceAtMost(ContactSheetGeometry.MAX_FRAME_COUNT)
+
+    val grid: ContactSheetGrid
+        get() = ContactSheetGrid.from(rows, columns)
+
+    fun withGrid(grid: ContactSheetGrid): VideoContactSheetOptions {
+        return copy(rows = grid.rows, columns = grid.cols)
+    }
+}
+
+enum class ContactSheetWidthMode {
+    Canvas,
+    Cell
+}
+
+enum class ContactSheetCellHeightMode {
+    AspectRatio,
+    Fixed
+}
+
+enum class ContactSheetAlignment {
+    Start,
+    Center,
+    End
+}
+
+enum class ContactSheetFitMode {
+    Crop,
+    Contain,
+    Stretch
+}
+
+enum class ContactSheetBackground {
+    Dark,
+    Light,
+    Transparent
+}
 
 enum class ContactSheetGrid(val rows: Int, val cols: Int, val frameCount: Int) {
     Grid3x3(3, 3, 9),
@@ -45,6 +96,12 @@ enum class ContactSheetGrid(val rows: Int, val cols: Int, val frameCount: Int) {
         Grid3x4 -> "3 × 4 (12)"
         Grid4x4 -> "4 × 4 (16)"
         Grid5x5 -> "5 × 5 (25)"
+    }
+
+    companion object {
+        fun from(rows: Int, columns: Int): ContactSheetGrid {
+            return entries.firstOrNull { it.rows == rows && it.cols == columns } ?: Grid3x4
+        }
     }
 }
 
@@ -76,6 +133,8 @@ data class VideoExportOptions(
     companion object {
         const val VIDEO_MIME_TYPE_H264 = "video/avc"
         const val VIDEO_MIME_TYPE_H265 = "video/hevc"
+        const val VIDEO_MIME_TYPE_VP9 = "video/x-vnd.on2.vp9"
+        const val VIDEO_MIME_TYPE_VP8 = "video/x-vnd.on2.vp8"
     }
 }
 
@@ -94,11 +153,20 @@ enum class VideoFrameInterpolationMode {
 
 data class AudioExportOptions(
     val audioBitrate: Int? = null,
+    val mp3BitrateMode: Mp3BitrateMode = Mp3BitrateMode.Cbr,
+    val mp3VbrQuality: Int = DEFAULT_MP3_VBR_QUALITY,
     val sampleRateHz: Int? = null,
     val channelCount: Int? = null,
     val trimRange: MediaTrimRange = MediaTrimRange(),
     val advanced: AudioAdvancedOptions = AudioAdvancedOptions()
 )
+
+enum class Mp3BitrateMode {
+    Cbr,
+    Vbr
+}
+
+const val DEFAULT_MP3_VBR_QUALITY = 2
 
 data class MediaTrimRange(
     val startSeconds: Double? = null,

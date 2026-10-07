@@ -191,6 +191,8 @@ import org.zenconverter.app.conversion.GifFrameExportMode
 import org.zenconverter.app.conversion.ImageExportOptions
 import org.zenconverter.app.conversion.ImageSuperResolutionMode
 import org.zenconverter.app.conversion.MediaTrimRange
+import org.zenconverter.app.conversion.Mp3BitrateMode
+import org.zenconverter.app.conversion.DEFAULT_MP3_VBR_QUALITY
 import org.zenconverter.app.conversion.PdfCompressionPreset
 import org.zenconverter.app.conversion.PdfExportOptions
 import org.zenconverter.app.conversion.PdfImagePageMode
@@ -254,6 +256,7 @@ enum class FileCategory(
             TargetFormat(TargetId.Mp4, "mp4", "Re-encode"),
             TargetFormat(TargetId.Mkv, "mkv", "Re-encode"),
             TargetFormat(TargetId.Mov, "mov", "Re-encode"),
+            TargetFormat(TargetId.Webm, "webm", "Re-encode"),
             TargetFormat(TargetId.Gif, "gif", "30s GIF"),
             TargetFormat(TargetId.ContactSheetJpg, "contact_sheet_jpg", "Summary Sheet"),
             TargetFormat(TargetId.ContactSheetPng, "contact_sheet_png", "Summary Sheet")
@@ -606,6 +609,8 @@ private val VIDEO_BITRATE_OPTIONS = listOf(
 
 private const val VIDEO_CODEC_H264 = "H.264"
 private const val VIDEO_CODEC_H265 = "H.265"
+private const val VIDEO_CODEC_VP9 = "VP9"
+private const val VIDEO_CODEC_VP8 = "VP8"
 
 private const val VIDEO_FRAME_RATE_ORIGINAL = "Original"
 private const val VIDEO_FRAME_RATE_25 = "Frame rate 25"
@@ -631,6 +636,21 @@ private val AUDIO_BITRATE_OPTIONS = listOf(
     AUDIO_BITRATE_VOICE
 )
 
+private const val AUDIO_MODE_CBR = "Constant bitrate (CBR)"
+private const val AUDIO_MODE_VBR = "Variable bitrate (VBR)"
+private val MP3_BITRATE_MODE_OPTIONS = listOf(AUDIO_MODE_CBR, AUDIO_MODE_VBR)
+
+private const val MP3_VBR_QUALITY_V0 = "V0 (highest quality)"
+private const val MP3_VBR_QUALITY_V2 = "V2 (recommended)"
+private const val MP3_VBR_QUALITY_V4 = "V4 (balanced)"
+private const val MP3_VBR_QUALITY_V6 = "V6 (smaller file)"
+private val MP3_VBR_QUALITY_OPTIONS = listOf(
+    MP3_VBR_QUALITY_V0,
+    MP3_VBR_QUALITY_V2,
+    MP3_VBR_QUALITY_V4,
+    MP3_VBR_QUALITY_V6
+)
+
 private const val AUDIO_SAMPLE_RATE_ORIGINAL = "Original"
 private const val AUDIO_SAMPLE_RATE_RECOMMENDED = "Recommended sample rate"
 private const val AUDIO_SAMPLE_RATE_44100 = "44.1 kHz"
@@ -654,7 +674,9 @@ private val OPUS_AUDIO_SAMPLE_RATE_OPTIONS = listOf(
 )
 
 private fun isOpusTarget(targetFormat: TargetFormat): Boolean {
-    return targetFormat.extension.equals("opus", ignoreCase = true)
+    return targetFormat.extension.equals("opus", ignoreCase = true) ||
+        targetFormat.id == TargetId.Webm ||
+        targetFormat.extension.equals("webm", ignoreCase = true)
 }
 
 private fun audioSampleRateOptionsFor(targetFormat: TargetFormat): List<String> {
@@ -2983,11 +3005,14 @@ private fun QueuedFile.withBatchVideoCompressionMode(
         videoOptions = videoOptions.copy(
             compressionMode = mode,
             videoBitrate = if (presetActive) null else videoOptions.videoBitrate,
-            videoMimeType = if (
-                presetActive &&
-                VideoExportOptions.VIDEO_MIME_TYPE_H265 in supportedVideoMimeTypes
-            ) {
-                VideoExportOptions.VIDEO_MIME_TYPE_H265
+            videoMimeType = if (presetActive) {
+                if (targetFormat.equals("WEBM", ignoreCase = true)) {
+                    VideoExportOptions.VIDEO_MIME_TYPE_VP9
+                } else if (VideoExportOptions.VIDEO_MIME_TYPE_H265 in supportedVideoMimeTypes) {
+                    VideoExportOptions.VIDEO_MIME_TYPE_H265
+                } else {
+                    videoOptions.videoMimeType
+                }
             } else {
                 videoOptions.videoMimeType
             },
@@ -3046,37 +3071,18 @@ private fun BatchVideoTargetOptions(
 ) {
     val isContactSheetTarget = target.extension.startsWith("contact_sheet", ignoreCase = true)
     if (isContactSheetTarget) {
-        val commonGrid = commonBatchLabel(files) { it.contactSheetOptions.grid.labelKey }
-        val allIncludeHeader = files.all { it.contactSheetOptions.includeHeader }
-        val allIncludeTimestamp = files.all { it.contactSheetOptions.includeTimestamp }
+        val first = files.firstOrNull()
         OptionGrid {
-            OptionDropdown(
-                menuId = "batch-contact-sheet-grid",
-                label = texts.contactSheetGridLabel,
-                selected = commonGrid,
-                options = CONTACT_SHEET_GRID_OPTIONS,
-                texts = texts,
-                openMenuId = openMenuId,
-                onOpenMenuChange = onOpenMenuChange,
-                onSelected = { key ->
-                    val grid = contactSheetGridFor(key)
-                    onUpdateFiles(files.map { it.copy(contactSheetOptions = it.contactSheetOptions.copy(grid = grid)) })
-                }
-            )
-            AdvancedSwitchRow(
-                label = texts.contactSheetIncludeHeader,
-                checked = allIncludeHeader,
-                onCheckedChange = { checked ->
-                    onUpdateFiles(files.map { it.copy(contactSheetOptions = it.contactSheetOptions.copy(includeHeader = checked)) })
-                }
-            )
-            AdvancedSwitchRow(
-                label = texts.contactSheetIncludeTimestamp,
-                checked = allIncludeTimestamp,
-                onCheckedChange = { checked ->
-                    onUpdateFiles(files.map { it.copy(contactSheetOptions = it.contactSheetOptions.copy(includeTimestamp = checked)) })
-                }
-            )
+            if (first != null) {
+                ContactSheetDesignerCard(
+                    options = first.contactSheetOptions,
+                    inputInfo = first.inputInfo,
+                    outputExtension = target.extension,
+                    onOptionsChange = { options ->
+                        onUpdateFiles(files.map { it.copy(contactSheetOptions = options) })
+                    }
+                )
+            }
         }
         return
     }
@@ -3251,11 +3257,18 @@ private fun BatchVideoTargetOptions(
                     }
                 )
             }
+            val batchVideoTargetId = if (files.all { it.targetFormat.equals("WEBM", ignoreCase = true) }) {
+                TargetId.Webm
+            } else if (files.none { it.targetFormat.equals("WEBM", ignoreCase = true) }) {
+                TargetId.Mp4
+            } else {
+                null
+            }
             OptionDropdown(
                 "batch-video-codec",
                 texts.codec,
                 commonBatchLabel(files) { videoCodecLabelFor(it.videoOptions.videoMimeType) },
-                videoCodecOptionsFor(supportedVideoMimeTypes),
+                videoCodecOptionsFor(batchVideoTargetId, supportedVideoMimeTypes),
                 texts,
                 openMenuId,
                 onOpenMenuChange
@@ -3315,7 +3328,7 @@ private fun BatchVideoTargetOptions(
                 "batch-video-audio-sample-rate",
                 texts.sampleRate,
                 commonBatchLabel(files) { audioSampleRateLabelFor(it.audioOptions.sampleRateHz) },
-                AUDIO_SAMPLE_RATE_OPTIONS,
+                if (files.all { it.targetFormat.equals("WEBM", ignoreCase = true) }) OPUS_AUDIO_SAMPLE_RATE_OPTIONS else AUDIO_SAMPLE_RATE_OPTIONS,
                 texts,
                 openMenuId,
                 onOpenMenuChange
@@ -3364,7 +3377,80 @@ private fun BatchAudioTargetOptions(
     onUpdateFiles: (List<QueuedFile>) -> Unit
 ) {
     OptionGrid {
-        if (audioSupportsBitrateOption(target)) {
+        if (isMp3Target(target)) {
+            OptionDropdown(
+                "batch-audio-mode",
+                texts.audioEncodingModeLabel(),
+                commonBatchLabel(files) { mp3BitrateModeLabelFor(it.audioOptions.mp3BitrateMode) },
+                MP3_BITRATE_MODE_OPTIONS,
+                texts,
+                openMenuId,
+                onOpenMenuChange
+            ) { value ->
+                onOpenMenuChange(null)
+                onUpdateFiles(
+                    files.map { file ->
+                        file.copy(
+                            audioOptions = file.audioOptions.copy(
+                                mp3BitrateMode = mp3BitrateModeFor(value)
+                            )
+                        )
+                    }
+                )
+            }
+            val commonMode = files
+                .map { it.audioOptions.mp3BitrateMode }
+                .distinct()
+                .singleOrNull()
+            if (commonMode == Mp3BitrateMode.Vbr) {
+                OptionDropdown(
+                    "batch-audio-vbr-quality",
+                    texts.mp3VbrQualityLabel(),
+                    commonBatchLabel(files) { mp3VbrQualityLabelFor(it.audioOptions.mp3VbrQuality) },
+                    MP3_VBR_QUALITY_OPTIONS,
+                    texts,
+                    openMenuId,
+                    onOpenMenuChange
+                ) { value ->
+                    onOpenMenuChange(null)
+                    onUpdateFiles(
+                        files.map { file ->
+                            file.copy(
+                                audioOptions = file.audioOptions.copy(
+                                    mp3VbrQuality = mp3VbrQualityFor(value)
+                                )
+                            )
+                        }
+                    )
+                }
+                Text(
+                    text = texts.mp3VbrQualityHint(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                OptionDropdown(
+                    "batch-audio-bitrate",
+                    texts.bitrate,
+                    commonBatchLabel(files) { audioEncodingSummaryFor(it.audioOptions, target) },
+                    AUDIO_BITRATE_OPTIONS,
+                    texts,
+                    openMenuId,
+                    onOpenMenuChange
+                ) { value ->
+                    onOpenMenuChange(null)
+                    onUpdateFiles(
+                        files.map { file ->
+                            file.copy(
+                                audioOptions = file.audioOptions.copy(
+                                    audioBitrate = audioBitrateToBits(value)
+                                )
+                            )
+                        }
+                    )
+                }
+            }
+        } else if (audioSupportsBitrateOption(target)) {
             OptionDropdown(
                 "batch-audio-bitrate",
                 texts.bitrate,
@@ -4116,12 +4202,26 @@ private fun VideoMergeGroupCard(
                     "video-merge-${group.id}-target",
                     texts.target,
                     group.targetFormat,
-                    listOf("MP4", "MKV", "MOV"),
+                    listOf("MP4", "MKV", "MOV", "WEBM"),
                     texts,
                     openMenuId,
                     onOpenMenuChange
                 ) { value ->
-                    onUpdateGroup(group.copy(targetFormat = value))
+                    val wasWebm = group.targetFormat.equals("WEBM", ignoreCase = true)
+                    val isWebm = value.equals("WEBM", ignoreCase = true)
+                    val newMimeType = if (isWebm && !wasWebm) {
+                        VideoExportOptions.VIDEO_MIME_TYPE_VP9
+                    } else if (!isWebm && wasWebm) {
+                        VideoExportOptions.VIDEO_MIME_TYPE_H264
+                    } else {
+                        group.videoOptions.videoMimeType
+                    }
+                    onUpdateGroup(
+                        group.copy(
+                            targetFormat = value,
+                            videoOptions = group.videoOptions.copy(videoMimeType = newMimeType)
+                        )
+                    )
                 }
 
                 OptionDropdown(
@@ -4135,11 +4235,21 @@ private fun VideoMergeGroupCard(
                 ) { value ->
                     val mode = videoCompressionModeFor(value)
                     val presetActive = mode != VideoCompressionMode.Standard
+                    val isWebm = group.targetFormat.equals("WEBM", ignoreCase = true)
                     onUpdateGroup(
                         group.copy(
                             videoOptions = group.videoOptions.copy(
                                 compressionMode = mode,
                                 videoBitrate = if (presetActive) null else group.videoOptions.videoBitrate,
+                                videoMimeType = if (presetActive) {
+                                    if (isWebm) {
+                                        VideoExportOptions.VIDEO_MIME_TYPE_VP9
+                                    } else {
+                                        VideoExportOptions.VIDEO_MIME_TYPE_H265
+                                    }
+                                } else {
+                                    group.videoOptions.videoMimeType
+                                },
                                 maxShortSidePixels = videoCompressionShortSideFor(mode)
                                     ?: group.videoOptions.maxShortSidePixels,
                                 maxFrameRate = videoCompressionFrameRateCapFor(mode)
@@ -4168,11 +4278,17 @@ private fun VideoMergeGroupCard(
                         )
                     }
 
+                    val isWebm = group.targetFormat.equals("WEBM", ignoreCase = true)
+                    val mergeCodecs = if (isWebm) {
+                        listOf(VIDEO_CODEC_VP9, VIDEO_CODEC_VP8)
+                    } else {
+                        listOf(VIDEO_CODEC_H264, VIDEO_CODEC_H265)
+                    }
                     OptionDropdown(
                         "video-merge-${group.id}-codec",
                         texts.codec,
                         videoCodecLabelFor(group.videoOptions.videoMimeType),
-                        listOf(VIDEO_CODEC_H264, VIDEO_CODEC_H265),
+                        mergeCodecs,
                         texts,
                         openMenuId,
                         onOpenMenuChange
@@ -4406,6 +4522,7 @@ private fun VideoOptions(
     contactSheetOptions: VideoContactSheetOptions = VideoContactSheetOptions(),
     onContactSheetOptionsChange: (VideoContactSheetOptions) -> Unit = {},
     sourceShortSide: Int? = null,
+    contactSheetInputInfo: FileBasicInfo? = null,
 ) {
     val isContactSheetTarget = targetFormat.id.isContactSheet
     if (isContactSheetTarget) {
@@ -4420,33 +4537,11 @@ private fun VideoOptions(
                 onEndSecondsChange = onTrimEndSecondsChange,
                 onTrimRangeChange = onTrimRangeChange
             )
-            OptionDropdown(
-                menuId = "${menuPrefix}contact-sheet-grid",
-                label = texts.contactSheetGridLabel,
-                selected = contactSheetOptions.grid.labelKey,
-                options = CONTACT_SHEET_GRID_OPTIONS,
-                texts = texts,
-                openMenuId = openMenuId,
-                onOpenMenuChange = onOpenMenuChange,
-                onSelected = { key ->
-                    onContactSheetOptionsChange(
-                        contactSheetOptions.copy(grid = contactSheetGridFor(key))
-                    )
-                }
-            )
-            AdvancedSwitchRow(
-                label = texts.contactSheetIncludeHeader,
-                checked = contactSheetOptions.includeHeader,
-                onCheckedChange = { checked ->
-                    onContactSheetOptionsChange(contactSheetOptions.copy(includeHeader = checked))
-                }
-            )
-            AdvancedSwitchRow(
-                label = texts.contactSheetIncludeTimestamp,
-                checked = contactSheetOptions.includeTimestamp,
-                onCheckedChange = { checked ->
-                    onContactSheetOptionsChange(contactSheetOptions.copy(includeTimestamp = checked))
-                }
+            ContactSheetDesignerCard(
+                options = contactSheetOptions,
+                inputInfo = contactSheetInputInfo,
+                outputExtension = targetFormat.extension,
+                onOptionsChange = onContactSheetOptionsChange
             )
         }
         return
@@ -4605,7 +4700,7 @@ private fun VideoOptions(
                 "${menuPrefix}video-audio-sample-rate",
                 texts.sampleRate,
                 audioSampleRate,
-                AUDIO_SAMPLE_RATE_OPTIONS,
+                if (isOpusTarget(targetFormat)) OPUS_AUDIO_SAMPLE_RATE_OPTIONS else AUDIO_SAMPLE_RATE_OPTIONS,
                 texts,
                 openMenuId,
                 onOpenMenuChange,
@@ -4660,6 +4755,8 @@ private fun AudioOptions(
     menuPrefix: String = "",
     trimRange: MediaTrimRange,
     sourceDurationMs: Long?,
+    bitrateMode: Mp3BitrateMode,
+    vbrQuality: Int,
     bitrate: String,
     sampleRate: String,
     channels: String,
@@ -4672,6 +4769,8 @@ private fun AudioOptions(
     onTrimStartSecondsChange: (Double?) -> Unit,
     onTrimEndSecondsChange: (Double?) -> Unit,
     onTrimRangeChange: (MediaTrimRange) -> Unit,
+    onBitrateModeChange: (String) -> Unit,
+    onVbrQualityChange: (String) -> Unit,
     onBitrateChange: (String) -> Unit,
     onSampleRateChange: (String) -> Unit,
     onChannelsChange: (String) -> Unit,
@@ -4694,7 +4793,46 @@ private fun AudioOptions(
             onEndSecondsChange = onTrimEndSecondsChange,
             onTrimRangeChange = onTrimRangeChange
         )
-        if (audioSupportsBitrateOption(targetFormat)) {
+        if (isMp3Target(targetFormat)) {
+            OptionDropdown(
+                "${menuPrefix}audio-mode",
+                texts.audioEncodingModeLabel(),
+                mp3BitrateModeLabelFor(bitrateMode),
+                MP3_BITRATE_MODE_OPTIONS,
+                texts,
+                openMenuId,
+                onOpenMenuChange,
+                onBitrateModeChange
+            )
+            if (bitrateMode == Mp3BitrateMode.Vbr) {
+                OptionDropdown(
+                    "${menuPrefix}audio-vbr-quality",
+                    texts.mp3VbrQualityLabel(),
+                    mp3VbrQualityLabelFor(vbrQuality),
+                    MP3_VBR_QUALITY_OPTIONS,
+                    texts,
+                    openMenuId,
+                    onOpenMenuChange,
+                    onVbrQualityChange
+                )
+                Text(
+                    text = texts.mp3VbrQualityHint(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                OptionDropdown(
+                    "${menuPrefix}audio-bitrate",
+                    texts.bitrate,
+                    bitrate,
+                    AUDIO_BITRATE_OPTIONS,
+                    texts,
+                    openMenuId,
+                    onOpenMenuChange,
+                    onBitrateChange
+                )
+            }
+        } else if (audioSupportsBitrateOption(targetFormat)) {
             OptionDropdown(
                 "${menuPrefix}audio-bitrate",
                 texts.bitrate,
@@ -6249,7 +6387,7 @@ private fun QueuedFileOptionsPanel(
                 compressionMode = videoCompressionLabelFor(file.videoOptions.compressionMode),
                 bitrate = videoBitrateLabelFor(file.videoOptions.videoBitrate),
                 codec = videoCodecLabelFor(file.videoOptions.videoMimeType),
-                codecOptions = videoCodecOptionsFor(supportedVideoMimeTypes),
+                codecOptions = videoCodecOptionsFor(selectedTarget.targetFormat.id, supportedVideoMimeTypes),
                 frameRate = videoFrameRateLabelFor(file.videoOptions.maxFrameRate),
                 audioBitrate = audioBitrateLabelFor(file.audioOptions.audioBitrate),
                 audioSampleRate = audioSampleRateLabelFor(file.audioOptions.sampleRateHz),
@@ -6262,6 +6400,7 @@ private fun QueuedFileOptionsPanel(
                 onContactSheetOptionsChange = { options ->
                     onUpdateFile(file.copy(contactSheetOptions = options))
                 },
+                contactSheetInputInfo = file.inputInfo,
                 sourceShortSide = file.inputInfo?.let {
                     val w = it.width ?: 0
                     val h = it.height ?: 0
@@ -6272,6 +6411,31 @@ private fun QueuedFileOptionsPanel(
                 openMenuId = openMenuId,
                 onOpenMenuChange = onOpenMenuChange,
                 onTrimInputModeChange = onTrimInputModeChange,
+                onTrimStartSecondsChange = { value ->
+                    onUpdateFile(
+                        file.copy(
+                            videoOptions = file.videoOptions.copy(
+                                trimRange = file.videoOptions.trimRange.copy(startSeconds = value)
+                            )
+                        )
+                    )
+                },
+                onTrimEndSecondsChange = { value ->
+                    onUpdateFile(
+                        file.copy(
+                            videoOptions = file.videoOptions.copy(
+                                trimRange = file.videoOptions.trimRange.copy(endSeconds = value)
+                            )
+                        )
+                    )
+                },
+                onTrimRangeChange = { range ->
+                    onUpdateFile(
+                        file.copy(
+                            videoOptions = file.videoOptions.copy(trimRange = range)
+                        )
+                    )
+                },
                 onFrameInterpolationChange = { value ->
                     val mode = videoInterpolationModeFor(value)
                     val isInterpolationActive = mode != VideoFrameInterpolationMode.Off
@@ -6304,31 +6468,6 @@ private fun QueuedFileOptionsPanel(
                         )
                     )
                 },
-                onTrimStartSecondsChange = { value ->
-                    onUpdateFile(
-                        file.copy(
-                            videoOptions = file.videoOptions.copy(
-                                trimRange = file.videoOptions.trimRange.copy(startSeconds = value)
-                            )
-                        )
-                    )
-                },
-                onTrimEndSecondsChange = { value ->
-                    onUpdateFile(
-                        file.copy(
-                            videoOptions = file.videoOptions.copy(
-                                trimRange = file.videoOptions.trimRange.copy(endSeconds = value)
-                            )
-                        )
-                    )
-                },
-                onTrimRangeChange = { range ->
-                    onUpdateFile(
-                        file.copy(
-                            videoOptions = file.videoOptions.copy(trimRange = range)
-                        )
-                    )
-                },
                 onResolutionChange = { value ->
                     onUpdateFile(
                         file.copy(
@@ -6341,16 +6480,21 @@ private fun QueuedFileOptionsPanel(
                 onCompressionModeChange = { value ->
                     val mode = videoCompressionModeFor(value)
                     val presetActive = mode != VideoCompressionMode.Standard
+                    val isWebm = selectedTarget.targetFormat.id == TargetId.Webm ||
+                        selectedTarget.targetFormat.extension.equals("webm", ignoreCase = true)
                     onUpdateFile(
                         file.copy(
                             videoOptions = file.videoOptions.copy(
                                 compressionMode = mode,
                                 videoBitrate = if (presetActive) null else file.videoOptions.videoBitrate,
-                                videoMimeType = if (
-                                    presetActive &&
-                                    VideoExportOptions.VIDEO_MIME_TYPE_H265 in supportedVideoMimeTypes
-                                ) {
-                                    VideoExportOptions.VIDEO_MIME_TYPE_H265
+                                videoMimeType = if (presetActive) {
+                                    if (isWebm) {
+                                        VideoExportOptions.VIDEO_MIME_TYPE_VP9
+                                    } else if (VideoExportOptions.VIDEO_MIME_TYPE_H265 in supportedVideoMimeTypes) {
+                                        VideoExportOptions.VIDEO_MIME_TYPE_H265
+                                    } else {
+                                        file.videoOptions.videoMimeType
+                                    }
                                 } else {
                                     file.videoOptions.videoMimeType
                                 },
@@ -6428,6 +6572,8 @@ private fun QueuedFileOptionsPanel(
                 menuPrefix = menuPrefix,
                 trimRange = file.audioOptions.trimRange,
                 sourceDurationMs = file.inputInfo?.durationMs,
+                bitrateMode = file.audioOptions.mp3BitrateMode,
+                vbrQuality = file.audioOptions.mp3VbrQuality,
                 bitrate = audioBitrateLabelFor(file.audioOptions.audioBitrate),
                 sampleRate = audioSampleRateLabelFor(file.audioOptions.sampleRateHz),
                 channels = audioChannelsLabelFor(file.audioOptions.channelCount),
@@ -6461,6 +6607,12 @@ private fun QueuedFileOptionsPanel(
                             audioOptions = file.audioOptions.copy(trimRange = range)
                         )
                     )
+                },
+                onBitrateModeChange = { value ->
+                    onUpdateFile(file.copy(audioOptions = file.audioOptions.copy(mp3BitrateMode = mp3BitrateModeFor(value))))
+                },
+                onVbrQualityChange = { value ->
+                    onUpdateFile(file.copy(audioOptions = file.audioOptions.copy(mp3VbrQuality = mp3VbrQualityFor(value))))
                 },
                 onBitrateChange = { value ->
                     onUpdateFile(file.copy(audioOptions = file.audioOptions.copy(audioBitrate = audioBitrateToBits(value))))
@@ -7155,10 +7307,21 @@ private fun videoOptionsForTarget(
             advanced = VideoAdvancedOptions()
         )
     }
-    val codec = if (current.videoMimeType in supportedVideoMimeTypes) {
-        current.videoMimeType
+    val isWebm = targetFormat.id == TargetId.Webm || targetFormat.extension.equals("webm", ignoreCase = true)
+    val codec = if (isWebm) {
+        if (current.videoMimeType == VideoExportOptions.VIDEO_MIME_TYPE_VP8) {
+            VideoExportOptions.VIDEO_MIME_TYPE_VP8
+        } else {
+            VideoExportOptions.VIDEO_MIME_TYPE_VP9
+        }
     } else {
-        VideoExportOptions.VIDEO_MIME_TYPE_H264
+        if (current.videoMimeType == VideoExportOptions.VIDEO_MIME_TYPE_VP9 || current.videoMimeType == VideoExportOptions.VIDEO_MIME_TYPE_VP8) {
+            VideoExportOptions.VIDEO_MIME_TYPE_H264
+        } else if (current.videoMimeType in supportedVideoMimeTypes) {
+            current.videoMimeType
+        } else {
+            VideoExportOptions.VIDEO_MIME_TYPE_H264
+        }
     }
     return if (current.maxFrameRate == 30 && current.maxShortSidePixels == 480 &&
         current.videoBitrate == null && current.compressionMode == VideoCompressionMode.Standard
@@ -7245,6 +7408,8 @@ private fun videoBitrateLabelFor(value: Int?): String {
 private fun videoCodecLabelFor(value: String): String {
     return when (value) {
         VideoExportOptions.VIDEO_MIME_TYPE_H265 -> VIDEO_CODEC_H265
+        VideoExportOptions.VIDEO_MIME_TYPE_VP9 -> VIDEO_CODEC_VP9
+        VideoExportOptions.VIDEO_MIME_TYPE_VP8 -> VIDEO_CODEC_VP8
         else -> VIDEO_CODEC_H264
     }
 }
@@ -7265,6 +7430,37 @@ private fun audioBitrateLabelFor(value: Int?): String {
         128_000 -> AUDIO_BITRATE_COMPACT
         96_000 -> AUDIO_BITRATE_VOICE
         else -> AUDIO_BITRATE_AUTO
+    }
+}
+
+private fun isMp3Target(targetFormat: TargetFormat): Boolean {
+    return targetFormat.id == TargetId.Mp3 || targetFormat.extension.equals("mp3", ignoreCase = true)
+}
+
+private fun audioEncodingSummaryFor(
+    options: AudioExportOptions,
+    targetFormat: TargetFormat
+): String {
+    return if (isMp3Target(targetFormat) && options.mp3BitrateMode == Mp3BitrateMode.Vbr) {
+        mp3VbrQualityLabelFor(options.mp3VbrQuality)
+    } else {
+        audioBitrateLabelFor(options.audioBitrate)
+    }
+}
+
+private fun mp3BitrateModeLabelFor(value: Mp3BitrateMode): String {
+    return when (value) {
+        Mp3BitrateMode.Cbr -> AUDIO_MODE_CBR
+        Mp3BitrateMode.Vbr -> AUDIO_MODE_VBR
+    }
+}
+
+private fun mp3VbrQualityLabelFor(value: Int): String {
+    return when (value) {
+        0 -> MP3_VBR_QUALITY_V0
+        4 -> MP3_VBR_QUALITY_V4
+        6 -> MP3_VBR_QUALITY_V6
+        else -> MP3_VBR_QUALITY_V2
     }
 }
 
@@ -7569,6 +7765,8 @@ private fun videoBitrateToBits(value: String): Int? {
 private fun videoCodecToMimeType(value: String): String {
     return when (value) {
         VIDEO_CODEC_H265 -> VideoExportOptions.VIDEO_MIME_TYPE_H265
+        VIDEO_CODEC_VP9 -> VideoExportOptions.VIDEO_MIME_TYPE_VP9
+        VIDEO_CODEC_VP8 -> VideoExportOptions.VIDEO_MIME_TYPE_VP8
         else -> VideoExportOptions.VIDEO_MIME_TYPE_H264
     }
 }
@@ -7582,13 +7780,20 @@ private fun videoFrameRateToCap(value: String): Int? {
     }
 }
 
-private fun videoCodecOptionsFor(supportedVideoMimeTypes: Set<String>): List<String> {
+private fun videoCodecOptionsFor(targetId: TargetId?, supportedVideoMimeTypes: Set<String>): List<String> {
+    if (targetId == TargetId.Webm) {
+        return listOf(VIDEO_CODEC_VP9, VIDEO_CODEC_VP8)
+    }
     return buildList {
         add(VIDEO_CODEC_H264)
         if (VideoExportOptions.VIDEO_MIME_TYPE_H265 in supportedVideoMimeTypes) {
             add(VIDEO_CODEC_H265)
         }
     }
+}
+
+private fun videoCodecOptionsFor(supportedVideoMimeTypes: Set<String>): List<String> {
+    return videoCodecOptionsFor(null, supportedVideoMimeTypes)
 }
 
 private fun audioBitrateToBits(value: String): Int? {
@@ -7598,6 +7803,19 @@ private fun audioBitrateToBits(value: String): Int? {
         AUDIO_BITRATE_COMPACT -> 128_000
         AUDIO_BITRATE_VOICE -> 96_000
         else -> null
+    }
+}
+
+private fun mp3BitrateModeFor(value: String): Mp3BitrateMode {
+    return if (value == AUDIO_MODE_VBR) Mp3BitrateMode.Vbr else Mp3BitrateMode.Cbr
+}
+
+private fun mp3VbrQualityFor(value: String): Int {
+    return when (value) {
+        MP3_VBR_QUALITY_V0 -> 0
+        MP3_VBR_QUALITY_V4 -> 4
+        MP3_VBR_QUALITY_V6 -> 6
+        else -> DEFAULT_MP3_VBR_QUALITY
     }
 }
 

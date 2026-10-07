@@ -129,7 +129,9 @@ class MainActivity : AppCompatActivity() {
     private var externalImportGeneration = 0
     private val supportedVideoMimeTypes = setOf(
         VideoExportOptions.VIDEO_MIME_TYPE_H264,
-        VideoExportOptions.VIDEO_MIME_TYPE_H265
+        VideoExportOptions.VIDEO_MIME_TYPE_H265,
+        VideoExportOptions.VIDEO_MIME_TYPE_VP9,
+        VideoExportOptions.VIDEO_MIME_TYPE_VP8
     )
 
     private val requestNotificationPermission = registerForActivityResult(
@@ -151,13 +153,14 @@ class MainActivity : AppCompatActivity() {
     private val openDocuments = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        if (uris.isEmpty()) return@registerForActivityResult
-        lifecycleScope.launch {
-            val documents = withContext(Dispatchers.IO) {
-                selectedDocumentsFromUris(uris)
-            }
-            enqueueUnifiedDocuments(documents)
-        }
+        enqueueSelectedDocumentsFromUris(uris)
+    }
+
+    private val openImportFiles = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@registerForActivityResult
+        enqueueSelectedDocumentsFromUris(galleryUrisFromIntent(result.data))
     }
 
     private val openImportAlbum = registerForActivityResult(
@@ -165,13 +168,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         if (result.resultCode != Activity.RESULT_OK) return@registerForActivityResult
         val uris = galleryUrisFromIntent(result.data)
-        if (uris.isEmpty()) return@registerForActivityResult
-        lifecycleScope.launch {
-            val documents = withContext(Dispatchers.IO) {
-                selectedDocumentsFromUris(uris)
-            }
-            enqueueUnifiedDocuments(documents)
-        }
+        enqueueSelectedDocumentsFromUris(uris)
     }
 
     private val requestAlbumMediaReadPermission = registerForActivityResult(
@@ -339,7 +336,7 @@ class MainActivity : AppCompatActivity() {
                     )
                 },
                 onPickFiles = {
-                    openDocuments.launch(arrayOf(MIME_TYPE_ANY))
+                    launchFileImportPicker()
                 },
                 onPickAlbumImages = {
                     requestAlbumPermissionThenPick(AlbumPickKind.Images)
@@ -1164,6 +1161,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun launchFileImportPicker() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = MIME_TYPE_ANY
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            openImportFiles.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            openDocuments.launch(arrayOf(MIME_TYPE_ANY))
+        }
+    }
+
     private fun openGalleryPicker(kind: AlbumPickKind) {
         val mediaUri = when (kind) {
             AlbumPickKind.Images -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -1201,6 +1211,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return results.values.toList()
+    }
+
+    private fun enqueueSelectedDocumentsFromUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        lifecycleScope.launch {
+            val documents = withContext(Dispatchers.IO) {
+                selectedDocumentsFromUris(uris)
+            }
+            enqueueUnifiedDocuments(documents)
+        }
     }
 
     private fun selectedDocumentsFromUris(uris: List<Uri>): List<SelectedDocument> {
@@ -2304,15 +2324,23 @@ private fun VideoMergeGroup.toConversionTaskInput(
 }
 
 private fun defaultVideoOptionsFor(targetFormat: TargetFormat): VideoExportOptions {
-    return if (targetFormat.extension.equals("gif", ignoreCase = true)) {
-        VideoExportOptions(
-            maxShortSidePixels = 480,
-            videoBitrate = null,
-            videoMimeType = VideoExportOptions.VIDEO_MIME_TYPE_H264,
-            maxFrameRate = 30
-        )
-    } else {
-        VideoExportOptions()
+    return when {
+        targetFormat.extension.equals("gif", ignoreCase = true) -> {
+            VideoExportOptions(
+                maxShortSidePixels = 480,
+                videoBitrate = null,
+                videoMimeType = VideoExportOptions.VIDEO_MIME_TYPE_H264,
+                maxFrameRate = 30
+            )
+        }
+        targetFormat.id == TargetId.Webm || targetFormat.extension.equals("webm", ignoreCase = true) -> {
+            VideoExportOptions(
+                videoMimeType = VideoExportOptions.VIDEO_MIME_TYPE_VP9
+            )
+        }
+        else -> {
+            VideoExportOptions()
+        }
     }
 }
 

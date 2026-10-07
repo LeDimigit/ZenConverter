@@ -16,15 +16,16 @@ as supported until it has a tested path, sample files, and failure behavior.
 | Input | Output | Status | Engine | Notes |
 | --- | --- | --- | --- | --- |
 | Any | Any | Planned | None | Do not imply universal support. |
-| MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS video audio tracks | MP3 / M4A / WAV / FLAC / WMA / OPUS | Stable | FFmpeg compatible | Extracts the first audio stream and encodes the selected audio target. M4A is AAC re-encode, not stream copy. Start/end-second trimming can limit the exported range. The app probes encoders before export where possible. Bitrate, sample-rate, and channel options are passed when the target supports them; video, subtitle, attachment, and extra audio tracks are not copied. |
+| MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS video audio tracks | MP3 / M4A / WAV / FLAC / WMA / OPUS | Stable | FFmpeg compatible | Extracts the first audio stream and encodes the selected audio target. M4A is AAC re-encode, not stream copy. Start/end-second trimming can limit the exported range. The app probes encoders before export where possible. Bitrate, sample-rate, and channel options are passed when the target supports them. Global tags, supported audio-stream tags, and chapters are copied when the output timeline is unchanged; supported attached-picture streams are copied without video re-encoding. Real video, subtitle, data, and extra audio streams are not copied. |
 | MP4 | MP4 | Stable | FFmpeg compatible | Re-encodes the first video track to H.264 or H.265 and audio to AAC in MP4. Manual mode exposes codec, bitrate, short-side resolution cap, max frame-rate, audio options, trim range, and advanced filters. Fixed compression presets own the video codec/CRF/preset/resolution/frame-rate strategy and AAC audio bitrate, while trim range still applies. Subtitles, attachments, and extra tracks are not copied. |
 | MP4 | MKV | Stable | FFmpeg compatible | Re-encodes the first video track to H.264 or H.265 and audio to AAC in Matroska. Manual mode exposes codec, bitrate, short-side resolution cap, max frame-rate, audio options, and advanced filters. Fixed compression presets own the video codec/CRF/preset/resolution/frame-rate strategy and AAC audio bitrate. Subtitles, attachments, and extra tracks are not copied. |
 | MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS | MOV | Stable | FFmpeg compatible | Re-encodes the first video track to H.264 or H.265 and audio to AAC in QuickTime MOV. Manual mode exposes codec, bitrate, short-side resolution cap, max frame-rate, audio options, and advanced filters. Fixed compression presets own the video codec/CRF/preset/resolution/frame-rate strategy and AAC audio bitrate. Subtitles, attachments, and extra tracks are not copied. |
+| MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS | WEBM | Stable | FFmpeg compatible | Re-encodes the first video track to VP9 (`libvpx-vp9`, default) or VP8 (`libvpx`) and audio to Opus (`libopus`) in WebM. Manual mode exposes codec, bitrate, short-side resolution cap, max frame-rate, audio options (Opus sample rates), trim range, and advanced filters. Fixed compression presets own the video codec/CRF/resolution/frame-rate strategy with mobile tuning (`-deadline realtime -cpu-used 4`, `-b:v 0`, multi-threaded) and Opus audio bitrate. Subtitles, attachments, and extra tracks are not copied. |
 | MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS | GIF | Stable | FFmpeg compatible | Creates an animated GIF from the first video track with palettegen/paletteuse. Start/end-second trimming can choose the source range; output is still limited to that range's first 30 seconds, 30 fps, and 900 frames. The default short-side cap is 480 px, with 720 px and Original options. Audio, subtitles, data streams, timing metadata, and container metadata are not copied. |
-| MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS | 概览拼图 (JPG / PNG Contact Sheet) | Stable | Native Bitmap / FFprobe | Generates a video overview contact sheet with evenly spaced frame sampling across the duration (or trim range). Grid presets include 3×3 (9), 3×4 (12, default), 4×4 (16), and 5×5 (25). Supports toggling metadata header (with codec, profile, resolution, fps, bitrate, audio info, and Apple-style top-right watermark capsule badge) and frame timestamp badges. Decodes via hardware-accelerated MediaMetadataRetriever downsampling with FFprobe metadata probing. Output is exported as high-quality JPG or lossless PNG. |
+| MP4 / MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS video | Contact sheet (JPG / PNG) | Stable | Native Bitmap / FFprobe | Generates a video overview contact sheet with evenly spaced frame sampling across the duration or trim range. Presets remain available, while the designer supports 1-10 rows and columns, canvas or cell width, aspect-ratio or fixed cell height, gaps, margins, alignment, crop/contain/stretch fitting, dark/light/transparent backgrounds, metadata header height, watermark, and timestamps. Output is capped at 100 frames, 8192px per dimension, and approximately 32MP. Transparent backgrounds are preserved only for PNG and become white for JPG. |
 | MKV / MOV / WEBM / AVI / 3GP / 3GPP / TS / MTS | MP4 | Stable | FFmpeg compatible | Re-encodes the first video track to H.264 or H.265 and audio to AAC in MP4. Manual mode exposes codec, bitrate, short-side resolution cap, max frame-rate, audio options, and advanced filters. Fixed compression presets own the video codec/CRF/preset/resolution/frame-rate strategy and AAC audio bitrate. Subtitles, attachments, and extra tracks are not copied. |
-| Multiple Videos (MP4 / MKV / MOV / WEBM / AVI / etc.) | MP4 / MKV / MOV | Stable | FFmpeg compatible | Video merge path. Concatenates multiple selected video files in order using FFmpeg `filter_complex concat`. Normalizes varying resolutions with aspect-ratio letterboxing/pillarboxing (`scale+pad`) to the reference video size (or chosen resolution limit), normalizes audio to 44.1kHz stereo AAC, and handles audio-less source clips with silent audio tracks. Supports compression presets and resolution/codec options. |
-| MP3 / M4A / AAC / FLAC / WAV / WMA / OGG / OPUS | MP3 / M4A / WAV / FLAC / WMA / OPUS | Stable | FFmpeg compatible | Common audio conversion path. MP3 uses `libmp3lame`; M4A uses AAC; WAV uses PCM; FLAC uses FLAC; WMA uses WMA v2 in ASF/WMA; OPUS uses `libopus` in Ogg. Start/end-second trimming can limit the exported range. Bitrate is applied for MP3/M4A/WMA/OPUS when selected. Sample-rate, channel, reverse, fade, volume/mute, echo, and audio noise-reduction controls are applied when selected. OPUS natively operates at 48 kHz (RFC 6716 / RFC 7845) and supports {48k, 24k, 16k, 12k, 8k}; non-Opus rates like 44.1 kHz are automatically resampled to 48 kHz. WAV/FLAC ignore bitrate. |
+| Multiple Videos (MP4 / MKV / MOV / WEBM / AVI / etc.) | MP4 / MKV / MOV / WEBM | Stable | FFmpeg compatible | Video merge path. Concatenates multiple selected video files in order using FFmpeg `filter_complex concat`. Normalizes varying resolutions with aspect-ratio letterboxing/pillarboxing (`scale+pad`) to the reference video size (or chosen resolution limit), normalizes audio (48kHz stereo Opus for WebM, 44.1kHz stereo AAC for MP4/MKV/MOV), and handles audio-less source clips with silent audio tracks. Supports compression presets and resolution/codec options. |
+| MP3 / M4A / AAC / FLAC / WAV / WMA / OGG / OPUS | MP3 / M4A / WAV / FLAC / WMA / OPUS | Stable | FFmpeg compatibility + container metadata verification | Common audio conversion path. MP3 uses `libmp3lame`; M4A uses AAC; WAV uses PCM; FLAC uses FLAC; WMA uses WMA v2 in ASF/WMA; OPUS uses `libopus` in Ogg. Start/end-second trimming can limit the exported range. MP3 offers CBR bitrate choices or VBR quality presets V0/V2/V4/V6; M4A/WMA/OPUS use selected bitrate when supported. Sample-rate, channel, reverse, fade, volume/mute, echo, and audio noise-reduction controls are applied when selected. For MP3, Opus, and FLAC, the first JPEG/PNG cover and common music fields plus ordinary embedded lyrics are verified in the native output container; MP3 lyrics are repaired to a real ID3 `USLT` frame, while Opus/FLAC may use one metadata-only `-c:a copy` remux if the first mux is incomplete. If supported metadata is present but cannot be verified, the task fails and retains a diagnostic. Multiple covers, private tags, external `.lrc`, timed lyric semantics, and WAV/WMA/M4A parity are outside this guarantee. Chapters are dropped for trims/splits. OPUS natively operates at 48 kHz (RFC 6716 / RFC 7845) and supports {48k, 24k, 16k, 12k, 8k}; non-Opus rates like 44.1 kHz are automatically resampled to 48 kHz. WAV/FLAC ignore bitrate. |
 | JPG / JPEG / JFIF / JPE / PNG / WEBP | JPG / JFIF / PNG / WEBP / ICO | Stable | Native Bitmap / Tencent NCNN Vulkan | Static image conversion through Android platform bitmap APIs. JFIF output is JPEG-encoded pixels with a `.jfif` extension. JPG/JFIF/WEBP quality presets are Original 100, High 95, Balanced 85, Small 60; WEBP also offers Android 11+ lossless output. ICO output is a multi-size PNG-in-ICO file. PNG is written as lossless output. Transparency is preserved for PNG/WEBP/ICO and flattened to white for JPG/JFIF. Metadata is not copied, though JPEG EXIF orientation is applied best-effort; animated WEBP is not preserved as animation. Optional super-resolution upscales raster outputs (JPG/JFIF/PNG/WEBP) before encoding: bilinear 2×/3×/4× (`createScaledBitmap`) and Real-ESRGAN 4× AI models (`realesr-general-x4v3` 4.65 MB compact and `RealESRGAN_x4plus` 63.9 MB high-quality) through Tencent NCNN with Vulkan GPU acceleration. The AI models are downloaded at runtime from an R2 direct link and SHA-256 verified; they are slower and do not preserve transparency. While a scale is active it forces original quality and hides GIF frame splitting. Output pixel budget scales with device RAM (32 MP per GiB, 64 MP minimum, 512 MP maximum). |
 | JPG / JPEG / JFIF / JPE | Inspect / clean / restore metadata | Stable | Native JPEG segment tool | Separate privacy tool, not a conversion task. It inspects common EXIF values and removable JPEG metadata segments, then can remove EXIF/XMP, IPTC/Photoshop, and comment segments in place without re-encoding pixels. JFIF, ICC, and Adobe display-related segments are preserved. Removed metadata is backed up in app-private data and can be restored only when the selected image's metadata-stripped core SHA-256 and dimensions match. |
 | HEIC / HEIF | Inspect metadata | Stable | ExifInterface / Platform decode | Separate privacy tool can inspect EXIF values (GPS coordinates, capture time, camera make/model, orientation, etc.) through Android platform ExifInterface. In-place metadata cleanup is not supported due to ISOBMFF container complexity and lack of platform writeback APIs. |
@@ -90,15 +91,25 @@ as supported until it has a tested path, sample files, and failure behavior.
 
 ## Current Native Media Limits
 
-- Video targets are intentionally limited to MP4, MKV, MOV, and GIF. GIF is
+- Video targets are intentionally limited to MP4, MKV, MOV, WEBM, and GIF. GIF is
   output-only for video sources in this milestone, not a normal image output
   target.
 - Audio targets are connected for MP3, M4A, WAV, FLAC, WMA, and OPUS. Audio category
   tasks always use the FFmpeg compatibility path and true audio re-encoding.
-  M4A output is AAC encoding, not audio-track copy.
+  M4A output is AAC encoding, not audio-track copy. The compatibility path
+  explicitly copies global tags and unchanged chapters. MP3, Opus, and FLAC
+  targets use the native metadata path described below; Opus writes an RFC 7845
+  `METADATA_BLOCK_PICTURE` comment instead of mapping a video stream. MP3,
+  M4A, and FLAC may map a supported `attached_pic` with `-c:v copy`. WAV and
+  WMA retain tags only where their output muxers support them and do not
+  promise portable embedded cover art.
 - Video files selected in the Audio lane map only the first audio stream and
-  encode the selected audio target. Video, subtitles, data streams, attachments,
-  extra audio tracks, and metadata are not copied.
+  encode the selected audio target. A real video stream is never selected as
+  cover art: only the `attached_pic` disposition is eligible. Subtitles, data
+  streams, attachments, and extra audio tracks are not copied. Timed lyric
+  subtitle/data streams are outside this milestone; common plain lyric tags
+  such as `LYRICS`/`UNSYNCEDLYRICS` are normalized to the target's `lyrics` tag
+  when present, subject to muxer/player support.
 - Video and audio FFmpeg outputs can apply start/end-second trimming and multi-point splitting into multiple segment files.
   Trimming is a re-encode range selection, not byte-exact lossless cutting. If a
   range is set, start must be before the readable source duration and end must
@@ -118,21 +129,22 @@ as supported until it has a tested path, sample files, and failure behavior.
   for this replacement binary still needs to be recorded before a tagged
   release.
 - Video compatibility output is true re-encoding, not stream-copy remux:
-  `-map 0:v:0 -map 0:a:0? -sn -dn -c:v libx264|libx265 -c:a aac`.
+  `-map 0:v:0 -map 0:a:0? -sn -dn -c:v libx264|libx265|libvpx-vp9|libvpx -c:a aac|libopus`.
   MP4 output writes `-f mp4` plus `+faststart`; MKV output writes
-  `-f matroska`; MOV output writes `-f mov` plus `+faststart`.
+  `-f matroska`; MOV output writes `-f mov` plus `+faststart`; WEBM output writes
+  `-f webm` with Opus audio (`libopus`) and mobile tuning (`-deadline realtime -cpu-used 4`, `-b:v 0`, multi-threaded).
 - Video compression presets are fixed CRF-based visual compression, not mathematical
   lossless compression. The off/manual state keeps the existing fixed-bitrate
   or Auto CRF behavior and exposes manual video/audio controls. Visual lossless,
-  balanced compression, and small-file modes force CRF output and use preset
-  `medium`; they hide/ignore manual video codec, bitrate, resolution,
+  balanced compression, and small-file modes force CRF output (calibrated for H.264, H.265, and VP9) and use preset
+  `medium` (or realtime deadline for VP9/VP8); they hide/ignore manual video codec, bitrate, resolution,
   frame-rate, audio options, and advanced controls. High-bitrate sources usually
   shrink substantially, but already efficient low-bitrate sources can become
   larger.
 - Video frame interpolation provides two 2× frame rate multiplication paths:
   - **Optical Flow 2× (Fast, Offline)**: Built-in in-engine motion compensated interpolation powered by FFmpeg's `minterpolate` filter (EPZS motion estimation + OBMC overlapped block motion compensation). Operates as a streaming pipeline with zero disk I/O, requires zero model downloads, and is 100% offline. The UI explicitly locks 2K (1440p), 4K (2160p), and "Original" (when source > 1080p) with lock indicators, and automatically clamps resolution to 1080p short-side to prevent extreme mobile CPU load and thermal throttling. Downscaling to 720p or 480p is supported for faster processing. Conflicting advanced options (rotation, mirror, aspect ratio, reverse, fade, motion blur) and max frame rate caps are suppressed while video trimming remains available.
   - **RIFE 2× (AI Neural)**: Deep-learning frame interpolation using RIFE optical flow running through Tencent NCNN with Vulkan GPU compute acceleration (`libzen_ncnn.so`). This feature is currently **Experimental**: due to mobile GPU driver, Vulkan compute extensions, and dynamic memory allocator variance across chipsets, inference runs with adaptive 1080p+ downscaling and lightmode memory deallocation. The pipeline decodes frames via FFmpeg, applies sliding-window RIFE inference ($N, N+1 \to N.5$), and re-encodes at 2× fps with high quality CRF 18 libx264 while remuxing original audio. While active, conflicting options (compression presets, manual bitrate, manual codec, manual frame rate, and advanced video filters) are locked/hidden, while video trimming remains available. The paired `.param` and `.bin` RIFE model files are downloaded together from an R2 direct link into app-private storage and SHA-256 verified before use.
-- Advanced filters are stable within their documented limits and only apply to MP4/MKV/MOV video outputs
+- Advanced filters are stable within their documented limits and only apply to MP4/MKV/MOV/WEBM video outputs
   and audio outputs. Video outputs support reverse playback, fade, mirror,
   rotate, fit/crop frame shape, and temporal motion blur. Audio outputs and video-output audio tracks
   support reverse playback, fade, volume/mute, echo, and `afftdn` audio noise
@@ -172,7 +184,10 @@ as supported until it has a tested path, sample files, and failure behavior.
   in this first path.
 - MP3, M4A, WAV, FLAC, WMA, and OPUS audio targets use FFmpeg compatibility arguments:
   `libmp3lame`, `aac`, `pcm_s16le`, `flac`, `wmav2`, and `libopus` respectively.
-  MP3/M4A/WMA/OPUS pass selected bitrate, sample-rate, channel options, and advanced
+  MP3 CBR uses the selected bitrate; MP3 VBR uses LAME quality presets V0, V2, V4,
+  or V6 through `-q:a` and does not pass `-b:a`. VBR is quality-based, so its
+  average bitrate varies with the source and it does not guarantee a smaller file.
+  M4A/WMA/OPUS pass selected bitrate, sample-rate, channel options, and advanced
   audio filters. WAV/FLAC pass sample-rate, channel options, and advanced audio
   filters, but intentionally do not pass bitrate. OPUS uses `libopus` which natively operates
   at 48 kHz (RFC 6716 / RFC 7845) and strictly supports only {48000, 24000, 16000, 12000, 8000} Hz.
@@ -189,6 +204,16 @@ as supported until it has a tested path, sample files, and failure behavior.
 - SAF input is passed to FFmpeg through FFmpegKit's SAF parameter when possible,
   with `/proc/self/fd/{fd}` retained as a fallback. Cache fallback for
   non-seekable providers is still future `SafeCache` work.
+- Audio metadata mapping is deliberately separate from audio encoding: the
+  audio stream is encoded once with the selected codec/options, while global
+  tags use `-map_metadata 0` plus an explicit source-audio stream mapping,
+  chapters use `-map_chapters 0` only when the source timeline is unchanged,
+  and MP3/FLAC cover streams use `-c:v copy` where available. Opus cover art
+  is written as `METADATA_BLOCK_PICTURE` in `OpusTags`.
+  Trimming or split outputs drop chapters because unshifted chapter timestamps
+  would be incorrect. Mapping cover art cannot make a lossy codec lossless:
+  MP3/AAC/Opus/WMA remain lossy encodes, while FLAC remains lossless and WAV is
+  PCM output. No additional audio re-encode is introduced for metadata.
 - No automated audio sample suite exists yet. Physical-device verification has
   covered MP3, M4A, WAV, FLAC, WMA, OPUS, and video audio extraction; an automated
   sample suite remains a future quality improvement.

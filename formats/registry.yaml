@@ -2,6 +2,7 @@ version: 1
 policy:
   unsupported_behavior: "Show explicitly. Do not imply full support."
   local_processing: "Required unless a future feature is clearly marked online."
+  audio_metadata_guarantee: "MP3, Opus, and FLAC targets verify common music fields, one validated JPEG/PNG primary cover, and ordinary embedded lyrics in the native output container. MP3 lyrics are repaired as ID3 USLT; Opus and FLAC may use one metadata-only -c:a copy remux. Required metadata verification failure fails the task. M4A, WAV, WMA, multiple covers, private tags, external LRC, and timed lyrics remain outside this guarantee."
 
 groups:
   media:
@@ -26,11 +27,16 @@ groups:
         engine: ffmpeg-compatible
         status: stable
         note: "FFmpeg re-encode path for video inputs. Encodes the first video track with H.264/H.265 and writes AAC audio in a QuickTime MOV container. Fixed compression presets own CRF/preset/resolution/frame-rate strategy and AAC audio bitrate; manual-mode advanced filters (including temporal motion blur) apply."
-      - from: multiple-videos
-        to: mp4-mkv-mov
+      - from: video
+        to: webm
         engine: ffmpeg-compatible
         status: stable
-        note: "Video merge path. Concatenates multiple selected video files in order using FFmpeg filter_complex concat with aspect-ratio letterboxing/pillarboxing (scale+pad) and audio track normalization."
+        note: "FFmpeg re-encode path for video inputs. Encodes the first video track with VP9 (libvpx-vp9, default) or VP8 (libvpx) and writes Opus audio (libopus). Fixed compression presets own CRF/preset/resolution/frame-rate strategy with mobile tuning (-deadline realtime -cpu-used 4, -b:v 0, multi-threaded); manual-mode advanced filters apply."
+      - from: multiple-videos
+        to: mp4-mkv-mov-webm
+        engine: ffmpeg-compatible
+        status: stable
+        note: "Video merge path. Concatenates multiple selected video files in order using FFmpeg filter_complex concat with aspect-ratio letterboxing/pillarboxing (scale+pad) and audio track normalization (Opus 48kHz for WebM, AAC for MP4/MKV/MOV)."
       - from: video
         to: gif
         engine: ffmpeg-compatible
@@ -38,9 +44,8 @@ groups:
         note: "FFmpeg animated GIF output for video inputs. Uses palettegen/paletteuse, drops audio/subtitles/data streams, loops by default, and automatically limits output to the selected range's first 30 seconds, 30 fps, and 900 frames. GIF resolution defaults to a 480 px short side with 720 px and Original options."
       - from: video
         to: contact-sheet-jpg-png
-        engine: native
+        note: "Video overview contact sheet output (JPG/PNG) for video inputs. Samples evenly spaced frames across the video duration (or within the selected trim range) into a layout designed with custom rows, columns, canvas/cell width, cell height mode, gaps, margins, alignment, fit mode, background, metadata header, watermark, and timestamps. Native Canvas rendering uses hardware-accelerated MediaMetadataRetriever downsampling with FFprobe metadata probing. Layouts are capped at 100 frames, 8192px per dimension, and approximately 32MP; transparent backgrounds are preserved only for PNG and become white for JPG."
         status: stable
-        note: "Video overview contact sheet output (JPG/PNG) for video inputs. Samples evenly spaced frames across the video duration (or within the selected trim range) into a customizable grid (3x3, 3x4, 4x4, 5x5) using hardware-accelerated MediaMetadataRetriever downsampling with FFprobe metadata probing. Renders on native Canvas with comprehensive media metadata header, Apple-style top-right watermark capsule badge with app logo, and timestamp overlay on each frame."
       - from: mkv
         to: mp4
         engine: ffmpeg-compatible
@@ -81,31 +86,36 @@ groups:
         engine: ffmpeg-compatible
         status: stable
         note: "TS-family alias for routing. Uses the same FFmpeg re-encode path and fixed video compression presets."
+      # Audio outputs explicitly copy global/stream tags and unchanged
+      # chapters. MP3, M4A, and FLAC map attached_pic cover streams with
+      # -c:v copy; OPUS serializes the picture as METADATA_BLOCK_PICTURE;
+      # WAV/WMA keep tags only where their muxers support them.
+      # Trimming/splitting drops chapters whose source timestamps are invalid.
       - from: mp3
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Re-encodes MP3 through libmp3lame after runtime encoder probing. Bitrate, sample rate, channel, and advanced audio filter controls are passed when selected."
+        note: "Re-encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; sample rate, channel, and advanced audio filter controls are passed when selected. VBR is quality-based and has no fixed output bitrate."
       - from: m4a
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: flac
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: wav
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: wma
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Decodes WMA through FFmpeg and encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Decodes WMA through FFmpeg and encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: mp3
         to: m4a
         engine: ffmpeg-compatible
@@ -220,7 +230,7 @@ groups:
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Extracts the first audio track and encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Extracts the first audio track and encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: video
         to: wav
         engine: ffmpeg-compatible
@@ -250,7 +260,7 @@ groups:
         to: mp3
         engine: ffmpeg-compatible
         status: stable
-        note: "Encodes MP3 through libmp3lame after runtime encoder probing. Advanced audio filters apply where selected."
+        note: "Encodes MP3 through libmp3lame after runtime encoder probing. CBR bitrate controls and MP3 VBR quality presets (V0/V2/V4/V6) are available; advanced audio filters apply where selected."
       - from: opus
         to: m4a
         engine: ffmpeg-compatible
